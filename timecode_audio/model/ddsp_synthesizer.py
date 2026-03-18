@@ -205,43 +205,48 @@ def filtered_noise(
     fft_size: int = 128,
 ) -> torch.Tensor:
     """
-    Frame-wise filtered noise via overlap-add.
+    Frame-wise filtered noise via overlap-add (fully vectorized).
 
-    For each frame:
-        1. Generate white noise of length fft_size
-        2. FFT → multiply by noise_mags (spectral envelope) → IFFT
-        3. Overlap-add into output buffer
+    All frames are processed in a single batched FFT/IFFT, then overlap-added
+    using F.fold. No Python loop over frames.
 
     Returns : [batch, n_samples]
     """
     batch_size, n_frames, n_bands = noise_mags.shape
     device = noise_mags.device
     hop = frame_size
-    window = torch.hann_window(fft_size, device=device)
+    window = torch.hann_window(fft_size, device=device)  # [fft_size]
 
-    output = torch.zeros(batch_size, n_samples + fft_size, device=device)
+    # All noise frames at once: [B, n_frames, fft_size]
+    noise = torch.randn(batch_size, n_frames, fft_size, device=device)
+    noise = noise * window  # [fft_size] broadcasts over [B, n_frames, fft_size]
 
-    for i in range(n_frames):
-        # White noise frame
-        noise = torch.randn(batch_size, fft_size, device=device)
-        noise = noise * window.unsqueeze(0)
+    # Batch FFT: [B, n_frames, fft_size//2 + 1]
+    noise_fft = torch.fft.rfft(noise, n=fft_size)
 
-        # FFT
-        noise_fft = torch.fft.rfft(noise, n=fft_size)  # [batch, fft_size//2 + 1]
+    # Apply spectral envelope (magnitude only, preserve random phase)
+    noise_fft_filtered = noise_fft * noise_mags  # [B, n_frames, n_bands]
 
-        # Apply spectral envelope (magnitude only, preserve phase)
-        mags = noise_mags[:, i, :]  # [batch, n_bands]
-        noise_fft_filtered = noise_fft * mags
+    # Batch IFFT: [B, n_frames, fft_size]
+    noise_frames = torch.fft.irfft(noise_fft_filtered, n=fft_size)
+    noise_frames = noise_frames * window  # synthesis window
 
-        # IFFT
-        noise_frame = torch.fft.irfft(noise_fft_filtered, n=fft_size)  # [batch, fft_size]
-        noise_frame = noise_frame * window.unsqueeze(0)
+    # Overlap-add via F.fold
+    # fold expects [B, fft_size, n_frames]; output [B, 1, 1, fold_length]
+    fold_length = (n_frames - 1) * hop + fft_size
+    output = F.fold(
+        noise_frames.permute(0, 2, 1),        # [B, fft_size, n_frames]
+        output_size=(1, fold_length),
+        kernel_size=(1, fft_size),
+        stride=(1, hop),
+    ).squeeze(1).squeeze(1)                    # [B, fold_length]
 
-        # Overlap-add
-        start = i * hop
-        end = start + fft_size
-        if end <= output.shape[1]:
-            output[:, start:end] += noise_frame
+    # Pad with zeros if fold_length < n_samples (last partial frame gap)
+    if fold_length < n_samples:
+        output = torch.cat(
+            [output, torch.zeros(batch_size, n_samples - fold_length, device=device)],
+            dim=1,
+        )
 
     return output[:, :n_samples]
 
