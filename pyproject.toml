@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "timecode-audio"
+version = "0.1.0"
+description = "ADSR-conditioned timecode-aligned generative audio"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.24",
+    "timecode>=1.3",
+    "torch>=2.0",
+    "torchaudio>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["timecode_audio*"]
+
+[tool.pytest.ini_options]
+testpaths = ["timecode_audio/tests"]
