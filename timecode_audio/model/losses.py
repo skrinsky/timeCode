@@ -79,16 +79,16 @@ class _STFTMagnitude(nn.Module):
         super().__init__()
         self.n_fft = n_fft
         self.hop_length = hop_length
+        self.register_buffer("window", torch.hann_window(n_fft))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [batch, n_samples]
-        window = torch.hann_window(self.n_fft, device=x.device)
         stft = torch.stft(
             x,
             n_fft=self.n_fft,
             hop_length=self.hop_length,
             win_length=self.n_fft,
-            window=window,
+            window=self.window,
             return_complex=True,
         )
         return stft.abs()  # [batch, freq, time]

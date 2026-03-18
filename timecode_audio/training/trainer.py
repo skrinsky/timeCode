@@ -70,11 +70,22 @@ class Trainer:
             weight_decay=config.weight_decay,
         )
 
-        # Cosine LR schedule
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        # LR schedule: linear warmup then cosine decay
+        warmup = torch.optim.lr_scheduler.LinearLR(
             self.optimizer,
-            T_max=config.total_steps,
+            start_factor=1e-6,
+            end_factor=1.0,
+            total_iters=config.warmup_steps,
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=max(1, config.total_steps - config.warmup_steps),
             eta_min=config.learning_rate * 0.01,
+        )
+        self.scheduler = torch.optim.lr_scheduler.SequentialLR(
+            self.optimizer,
+            schedulers=[warmup, cosine],
+            milestones=[config.warmup_steps],
         )
 
         # --- Data ---
