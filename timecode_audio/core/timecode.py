@@ -89,7 +89,7 @@ def smpte_to_sample_offset(
     if frame_rate in _DROP_FRAME_RATES:
         total_frames = _drop_frame_count(hh, mm, ss, ff, frame_rate)
     else:
-        fps_int = int(_RATE_RATIONAL[frame_rate])
+        fps_int = math.ceil(_RATE_RATIONAL[frame_rate])   # nominal fps (e.g. 30 for 29.97 ND)
         total_frames = hh * 3600 * fps_int + mm * 60 * fps_int + ss * fps_int + ff
 
     # Use rational arithmetic to avoid float drift

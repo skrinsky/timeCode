@@ -96,6 +96,19 @@ class TestNonDropFrame:
         expected = int(3600 * 24 * SAMPLE_RATE * 1001 / 24000)
         assert offset == expected
 
+    def test_2997nd_one_second(self):
+        # 29.97 ND uses nominal 30fps labeling: 1 second = 30 timecode frames
+        # actual sample offset = 30 * 48000 * 1001/30000 = 48048
+        offset = smpte_to_sample_offset("00:00:01:00", "29.97", SAMPLE_RATE)
+        assert offset == 48048  # NOT 46446 (which would result from fps=29)
+
+    def test_2997nd_round_trip(self):
+        # smpte → samples → smpte must round-trip cleanly for 29.97 ND
+        tc = "01:23:45:15"
+        offset = smpte_to_sample_offset(tc, "29.97", SAMPLE_RATE)
+        recovered = sample_offset_to_smpte(offset, "29.97", SAMPLE_RATE)
+        assert recovered == tc
+
 
 # ---------------------------------------------------------------------------
 # Drop-frame edge cases (29.97 DF) — the critical correctness tests
