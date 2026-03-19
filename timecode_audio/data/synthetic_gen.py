@@ -318,11 +318,10 @@ class SyntheticDataset(torch.utils.data.Dataset):
         rec = self.records[idx]
         audio_path = self.data_dir / rec["audio_path"]
 
-        waveform, sr = torchaudio.load(str(audio_path))
+        data, sr = sf.read(str(audio_path), dtype="float32")
+        waveform = torch.from_numpy(data)  # [n_samples]
         if sr != self.sample_rate:
-            waveform = torchaudio.functional.resample(waveform, sr, self.sample_rate)
-
-        waveform = waveform.squeeze(0)  # [n_samples]
+            waveform = torchaudio.functional.resample(waveform.unsqueeze(0), sr, self.sample_rate).squeeze(0)
 
         # Pad or trim
         if waveform.shape[0] < self.max_samples:
