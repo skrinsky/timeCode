@@ -32,20 +32,29 @@ This project is building a novel generative audio system that maps ADSR envelope
 - Code: timecode_audio/
 
 **Implementation phases and status:**
-- ✅ Phase 0: Infrastructure complete (SMPTE parser, BPM resolver, CueEvent schema, ADSR gate/stage_position, ADSR inferer, defaults lookup) — 100 tests passing
-- ✅ Phase 1: DDSP baseline built (PitchEncoder, SpectralPredictor, harmonic synth at 48kHz, filtered noise, ADSREncoder, MSS loss, synthetic data generator, training loop) — 121 tests passing
-- ⏳ Phase 1 PENDING: vectorize filtered_noise loop before training (see project_pending_tasks.md)
-- ⏳ Phase 1 PENDING: push to git ✅ done — pull on 4090 server and run training
+- ✅ Phase 0: Infrastructure complete (SMPTE parser, BPM resolver, CueEvent schema, ADSR gate/stage_position, ADSR inferer, defaults lookup) — 123 tests passing
+- ✅ Phase 1: DDSP baseline built and all bugs fixed (filtered_noise vectorized, batch_size 64→16, LR warmup, STFT window buffer, 29.97ND timecode fix) — 134 tests passing
+- ✅ Stage 1 training: COMPLETE on 4090. 50K steps, final loss 0.93, checkpoint saved to checkpoints_stage1_backup/
+- ⏳ Stage 2 training: IN PROGRESS on 4090. 200K total steps, resuming from step 45K, all 5 instrument types (sine/sawtooth/square/FM2op/FM4op), pitch-only conditioning. ~8-9 hrs.
+- ✅ Phase 4 (partial): ADSR estimator built (adsr_estimator.py, estimator_trainer.py) — CNN on log-mel spectrograms, 4 regression heads, 11 tests passing. Ready to train after Stage 2.
+- 🔲 NEXT: Wire CLAP into trainer before Stage 3 (text_emb=None is hardcoded — must fix before NSynth fine-tuning)
 - 🔲 Phase 2: Inference pipeline (CueList → WAV)
-- 🔲 Phase 3: Real instrument fine-tuning
-- 🔲 Phase 4: ADSR estimator + AF3 labeling pipeline
+- 🔲 Phase 3: Real instrument fine-tuning (NSynth — pitched only, no drums)
 - 🔲 Phase 5: Pseudo-label + dataset validation
-- 🔲 Phase 6: Diffusion upgrade (Option B, ETTA backbone)
+- 🔲 Phase 6: Diffusion upgrade (Option B, ETTA backbone) — needed for drums/foley/percussion
 
 **Training setup:**
+- Server: cmn17, /scratch/summerk/timeCode, tmux session "train2"
 - Train on 4090 (CUDA), NOT M1 Metal — MPS has incomplete op support for torch.stft and torch.fft.rfft
 - CUDA PyTorch: `uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121`
-- Stage 1 curriculum: sine + sawtooth only, pitch-only conditioning (no text), 0–50K steps
-- After training: Stage 2 adds all synths + CLAP text encoder
+- torchaudio 2.5+ breaks save/load — use soundfile directly (already fixed in synthetic_gen.py)
+- Stage 2 data: 500K clips, all 5 instrument types, in data/synthetic/
+- After Stage 2: run run_train_estimator.py, then wire CLAP, then Stage 3 on NSynth
+- NSynth: pitched instruments only (piano, strings, brass, guitar, etc.) — no drums/percussion
+
+**CLAP integration (TODO before Stage 3):**
+- CLAPTextEncoder already written in text_encoder.py
+- Trainer hardcodes text_emb=None — needs to be wired up
+- Need: text dropout (30%), CLAP embeddings passed through SpectralPredictor, text_dim=512 in config
 
 **Why:** Motivated by the problem that generative audio can't align to post-production timecode. Intended for film/TV/game audio use cases. BPM mode also supports music production workflows.
