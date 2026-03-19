@@ -261,7 +261,7 @@ def generate_dataset(
             audio_path = audio_dir / filename
 
             audio_tensor = torch.from_numpy(clip).unsqueeze(0)  # [1, n_samples]
-            torchaudio.save(str(audio_path), audio_tensor, sr)
+            torchaudio.save(str(audio_path), audio_tensor, sr, backend="soundfile")
 
             meta = SyntheticClip(
                 audio_path=str(audio_path.relative_to(out)),
