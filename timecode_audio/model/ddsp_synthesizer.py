@@ -92,6 +92,7 @@ class SpectralPredictor(nn.Module):
         n_noise_bands: int = N_NOISE_BANDS,
     ) -> None:
         super().__init__()
+        self.text_dim = text_dim
         self.n_harmonics = n_harmonics
         self.n_noise_bands = n_noise_bands
         output_dim = n_harmonics + n_noise_bands
@@ -124,6 +125,11 @@ class SpectralPredictor(nn.Module):
         """
         if text_emb is not None:
             x = torch.cat([pitch_emb, text_emb], dim=-1)
+        elif self.text_dim > 0:
+            # Null conditioning (CFG dropout): pad with zeros for text portion
+            zeros = torch.zeros(pitch_emb.shape[0], self.text_dim,
+                                device=pitch_emb.device, dtype=pitch_emb.dtype)
+            x = torch.cat([pitch_emb, zeros], dim=-1)
         else:
             x = pitch_emb
 
@@ -205,43 +211,47 @@ def filtered_noise(
     fft_size: int = 128,
 ) -> torch.Tensor:
     """
-    Frame-wise filtered noise via overlap-add (fully vectorized).
+    Frame-wise filtered noise via overlap-add (fully vectorized, 50% overlap).
 
-    All frames are processed in a single batched FFT/IFFT, then overlap-added
-    using F.fold. No Python loop over frames.
+    noise_mags is at synthesis frame rate (one entry per frame_size samples).
+    Internally upsampled to noise frame rate (hop = fft_size // 2) for smooth
+    overlap-add with no gaps between frames.
 
     Returns : [batch, n_samples]
     """
     batch_size, n_frames, n_bands = noise_mags.shape
     device = noise_mags.device
-    hop = frame_size
-    window = torch.hann_window(fft_size, device=device)  # [fft_size]
+    hop = fft_size // 2                                # 64 — 50% overlap, no gaps
+    window = torch.hann_window(fft_size, device=device)
 
-    # All noise frames at once: [B, n_frames, fft_size]
-    noise = torch.randn(batch_size, n_frames, fft_size, device=device)
-    noise = noise * window  # [fft_size] broadcasts over [B, n_frames, fft_size]
+    # Upsample noise_mags from synthesis frame rate → noise frame rate
+    n_noise_frames = math.ceil((n_samples - fft_size) / hop) + 1
+    noise_mags_up = F.interpolate(
+        noise_mags.permute(0, 2, 1).float(),           # [B, n_bands, n_frames]
+        size=n_noise_frames,
+        mode='linear',
+        align_corners=True,
+    ).permute(0, 2, 1)                                 # [B, n_noise_frames, n_bands]
 
-    # Batch FFT: [B, n_frames, fft_size//2 + 1]
-    noise_fft = torch.fft.rfft(noise, n=fft_size)
+    # Generate white noise frames: [B, n_noise_frames, fft_size]
+    noise = torch.randn(batch_size, n_noise_frames, fft_size, device=device)
+    noise = noise * window
 
-    # Apply spectral envelope (magnitude only, preserve random phase)
-    noise_fft_filtered = noise_fft * noise_mags  # [B, n_frames, n_bands]
-
-    # Batch IFFT: [B, n_frames, fft_size]
-    noise_frames = torch.fft.irfft(noise_fft_filtered, n=fft_size)
-    noise_frames = noise_frames * window  # synthesis window
+    # Batch FFT → filter → IFFT
+    noise_fft          = torch.fft.rfft(noise, n=fft_size)           # [B, n_noise_frames, n_bands]
+    noise_fft_filtered = noise_fft * noise_mags_up
+    noise_frames       = torch.fft.irfft(noise_fft_filtered, n=fft_size)  # [B, n_noise_frames, fft_size]
+    noise_frames       = noise_frames * window                        # synthesis window
 
     # Overlap-add via F.fold
-    # fold expects [B, fft_size, n_frames]; output [B, 1, 1, fold_length]
-    fold_length = (n_frames - 1) * hop + fft_size
+    fold_length = (n_noise_frames - 1) * hop + fft_size
     output = F.fold(
-        noise_frames.permute(0, 2, 1),        # [B, fft_size, n_frames]
+        noise_frames.permute(0, 2, 1),                 # [B, fft_size, n_noise_frames]
         output_size=(1, fold_length),
         kernel_size=(1, fft_size),
         stride=(1, hop),
-    ).squeeze(1).squeeze(1)                    # [B, fold_length]
+    ).squeeze(1).squeeze(1)                            # [B, fold_length]
 
-    # Pad with zeros if fold_length < n_samples (last partial frame gap)
     if fold_length < n_samples:
         output = torch.cat(
             [output, torch.zeros(batch_size, n_samples - fold_length, device=device)],

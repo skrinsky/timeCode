@@ -23,14 +23,15 @@ N_MELS      = 128
 
 
 class _ConvBlock(nn.Module):
-    """Conv2d → BatchNorm → ReLU, stride 2 in both dimensions."""
+    """Conv2d → BatchNorm → ReLU → Dropout2d, stride 2 in both dimensions."""
 
-    def __init__(self, in_ch: int, out_ch: int) -> None:
+    def __init__(self, in_ch: int, out_ch: int, dropout: float = 0.1) -> None:
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(dropout),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -129,6 +130,143 @@ class ADSREstimator(nn.Module):
             "S": S,
             "R": torch.exp(log_R) - 1.0,
         }
+
+    @torch.no_grad()
+    def predict_mc(
+        self,
+        audio: torch.Tensor,   # [batch, n_samples] or [n_samples]
+        n_passes: int = 20,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        """
+        Monte Carlo dropout inference: run n_passes forward passes with dropout
+        active to estimate prediction uncertainty.
+
+        Returns
+        -------
+        means     : dict {A, D, S, R} — mean predictions in physical units
+        variances : dict {A, D, S, R} — variance across passes (uncertainty proxy)
+        """
+        if audio.dim() == 1:
+            audio = audio.unsqueeze(0)
+
+        was_training = self.training
+        self.train()   # keep Dropout2d active
+
+        results_A, results_D, results_S, results_R = [], [], [], []
+        for _ in range(n_passes):
+            log_A, log_D, S, log_R = self(audio)
+            results_A.append(torch.exp(log_A) - 1.0)
+            results_D.append(torch.exp(log_D) - 1.0)
+            results_S.append(S)
+            results_R.append(torch.exp(log_R) - 1.0)
+
+        if not was_training:
+            self.eval()
+
+        stack = lambda lst: torch.stack(lst, dim=0)   # [n_passes, batch]
+        means = {
+            "A": stack(results_A).mean(0),
+            "D": stack(results_D).mean(0),
+            "S": stack(results_S).mean(0),
+            "R": stack(results_R).mean(0),
+        }
+        variances = {
+            "A": stack(results_A).var(0),
+            "D": stack(results_D).var(0),
+            "S": stack(results_S).var(0),
+            "R": stack(results_R).var(0),
+        }
+        return means, variances
+
+    def predict_with_confidence(
+        self,
+        audio: torch.Tensor,
+        platt_scaler: "PlattScaler | None" = None,
+        n_passes: int = 20,
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        """
+        Returns (predictions_dict, confidence_score [batch]).
+        confidence_score is calibrated if platt_scaler is provided,
+        otherwise raw (1 / (1 + mean_variance)).
+        """
+        means, variances = self.predict_mc(audio, n_passes=n_passes)
+        mean_var = sum(variances.values()) / 4.0   # scalar per batch item
+        if platt_scaler is not None:
+            confidence = platt_scaler.transform(mean_var)
+        else:
+            confidence = 1.0 / (1.0 + mean_var)   # simple uncalibrated score
+        return means, confidence
+
+
+class PlattScaler:
+    """
+    Calibrates raw MC-dropout variance to a confidence score in [0, 1].
+
+    Fits logistic regression: P(correct) = sigmoid(a * log(var) + b)
+    on a held-out synthetic set where ground-truth ADSR is known.
+
+    Usage
+    -----
+    # Fit (once, on held-out synthetic validation set):
+    scaler = PlattScaler()
+    scaler.fit(variances, is_correct)
+
+    # Apply at pseudo-label time:
+    confidence = scaler.transform(variances)
+    """
+
+    def __init__(self) -> None:
+        self.a: float = -1.0   # default: higher variance → lower confidence
+        self.b: float = 0.0
+        self._fitted: bool = False
+
+    def fit(
+        self,
+        variances: torch.Tensor,   # [N] — mean variance per clip
+        is_correct: torch.Tensor,  # [N] bool — True if prediction within threshold
+    ) -> None:
+        """Fit a · log(var) + b via gradient descent (no sklearn required)."""
+        import numpy as np
+        x = torch.log(variances.float() + 1e-8)   # [N]
+        y = is_correct.float()                     # [N]
+
+        # Gradient descent on binary cross-entropy
+        a = torch.tensor(-1.0, requires_grad=True)
+        b = torch.tensor(0.0,  requires_grad=True)
+        opt = torch.optim.LBFGS([a, b], max_iter=200, tolerance_grad=1e-7)
+
+        def closure():
+            opt.zero_grad()
+            logits = a * x + b
+            loss = F.binary_cross_entropy_with_logits(logits, y)
+            loss.backward()
+            return loss
+
+        opt.step(closure)
+        self.a = float(a.item())
+        self.b = float(b.item())
+        self._fitted = True
+
+    def transform(self, variances: torch.Tensor) -> torch.Tensor:
+        """Returns calibrated confidence scores in [0, 1]."""
+        log_var = torch.log(variances.float() + 1e-8)
+        return torch.sigmoid(self.a * log_var + self.b)
+
+    def save(self, path: str) -> None:
+        import json
+        with open(path, "w") as f:
+            json.dump({"a": self.a, "b": self.b}, f)
+
+    @classmethod
+    def load(cls, path: str) -> "PlattScaler":
+        import json
+        scaler = cls()
+        with open(path) as f:
+            d = json.load(f)
+        scaler.a = d["a"]
+        scaler.b = d["b"]
+        scaler._fitted = True
+        return scaler
 
 
 def adsr_estimator_loss(

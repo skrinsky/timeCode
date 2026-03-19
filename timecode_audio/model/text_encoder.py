@@ -34,9 +34,10 @@ class CLAPTextEncoder(nn.Module):
     Frozen CLAP text encoder (LAION-CLAP or Microsoft CLAP).
 
     Weights are frozen — we use CLAP purely as a feature extractor.
-    Only the text branch is loaded to keep memory footprint small.
+    get_text_features() runs both the text model and the projection head,
+    returning the projected 512-dim embedding (not raw 768-dim pooler output).
 
-    output_dim: 512 (LAION-CLAP) or 1024 (CLAP-2023) depending on checkpoint.
+    output_dim: 512 (LAION-CLAP projected)
     """
 
     def __init__(
@@ -47,34 +48,31 @@ class CLAPTextEncoder(nn.Module):
     ) -> None:
         super().__init__()
         self.output_dim = output_dim
+        self._device = device
 
         try:
             from transformers import ClapModel, ClapProcessor
-            self._model = ClapModel.from_pretrained(model_name).text_model
+            self._model = ClapModel.from_pretrained(model_name)
             self._processor = ClapProcessor.from_pretrained(model_name)
             self._model.eval()
             for p in self._model.parameters():
                 p.requires_grad_(False)
-            self._available = True
         except ImportError:
             raise ImportError(
                 "transformers is required for CLAPTextEncoder. "
                 "Install with: uv pip install transformers"
             )
 
-        self._device = device
-
     @torch.no_grad()
     def forward(self, texts: list[str]) -> torch.Tensor:
         """
         texts : list of strings, length = batch_size
-        Returns : [batch, output_dim]
+        Returns : [batch, output_dim]  — projected CLAP text embeddings
         """
         inputs = self._processor(
             text=texts, return_tensors="pt", padding=True, truncation=True
         )
         inputs = {k: v.to(self._device) for k, v in inputs.items()}
-        outputs = self._model(**inputs)
-        # Use pooled output (CLS token or mean pool depending on CLAP version)
-        emb = outputs.pooler_output if hasattr(outputs, "pooler_output") else outputs.last_hidden_state[:, 0]
+        # get_text_features() applies both the text model and projection head → 512-dim
+        emb = self._model.get_text_features(**inputs)
         return emb

@@ -341,4 +341,5 @@ class SyntheticDataset(torch.utils.data.Dataset):
             "velocity":       torch.tensor(rec["velocity"],   dtype=torch.float32),
             "note_duration":  torch.tensor(rec["note_duration"], dtype=torch.float32),
             "text_prompt":    rec["text_prompt"],
+            "adsr_confidence": torch.tensor(rec.get("adsr_confidence", 1.0), dtype=torch.float32),
         }

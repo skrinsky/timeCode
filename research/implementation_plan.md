@@ -560,8 +560,8 @@ Multiple cues may overlap in time. Generate each independently, sum (mix) into t
 | Stage | Steps | Data | Key change |
 |-------|-------|------|------------|
 | 1 | 0–50K | Sine + sawtooth only | No text conditioning; verify backbone works |
-| 2 | 50K–200K | All synthetic instruments | Add text with 30% null dropout (CFG training) |
-| 3 | 200K–400K | 70% synthetic + 30% NSynth estimated | ADSR lr × 0.3; acquire real timbres |
+| 2 | 50K–200K | All synthetic instruments | Pitch-only, no text (synthetic data has no meaningful text labels; text_dim=0 preserves Stage 1 checkpoint compatibility) |
+| 3 | 200K–400K | 70% synthetic + 30% NSynth estimated | Add CLAP text conditioning + 30% null dropout (CFG training); ADSR lr × 0.3 (split optimizer param groups); requires partial weight load (text_dim 0→512 expands first Linear layer) |
 | 4 | 400K+ | + augmentation, upsample edge cases | Extreme ADSR combinations (A<5ms, A>400ms, S=0) |
 
 ### 6c. Classifier-free guidance

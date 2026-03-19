@@ -26,6 +26,7 @@ class TrainingConfig:
     total_steps: int = 500_000
     warmup_steps: int = 2_000
     grad_clip: float = 1.0
+    adsr_lr_scale:     float = 1.0            # multiplier for ADSR encoder LR (set to 0.3 for Stage 3)
     log_every: int = 100
     checkpoint_every: int = 5_000
     eval_every: int = 5_000
