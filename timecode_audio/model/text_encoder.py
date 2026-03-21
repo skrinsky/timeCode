@@ -1,12 +1,12 @@
 """
 Text encoder wrapper.
 
-Stage 1 (current): pitch-only conditioning — text encoder returns None.
-Stage 2+: CLAP text encoder (frozen weights).
+Stage 1–2: pitch-only conditioning — text encoder returns None (text_dim=0).
+Stage 3+: CLAP text encoder (frozen weights, text_dim=512).
 
 CLAP note: CLAP was trained at 48kHz audio but its text encoder is a
 standard transformer (BERT-style). Text input does not need resampling.
-Plug in the real CLAP encoder here when moving to Stage 2.
+Plug in the real CLAP encoder here when moving to Stage 3.
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ import torch.nn as nn
 
 class TextEncoderStub(nn.Module):
     """
-    Stage 1 stub: returns None, signalling pitch-only conditioning.
-    Replace with CLAPTextEncoder for Stage 2.
+    Stage 1–2 stub: returns None, signalling pitch-only conditioning.
+    Replace with CLAPTextEncoder for Stage 3.
     """
 
     def __init__(self) -> None:
@@ -75,4 +75,7 @@ class CLAPTextEncoder(nn.Module):
         inputs = {k: v.to(self._device) for k, v in inputs.items()}
         # get_text_features() applies both the text model and projection head → 512-dim
         emb = self._model.get_text_features(**inputs)
+        # Some transformers versions return a ModelOutput object instead of a tensor
+        if not isinstance(emb, torch.Tensor):
+            emb = emb.text_embeds if hasattr(emb, "text_embeds") else emb.pooler_output
         return emb
