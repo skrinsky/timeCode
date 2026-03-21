@@ -150,10 +150,27 @@ def compute_adsr_error(
     fitted = fit_adsr_to_envelope(envelope, sample_rate, note_duration_ms=note_duration_ms)
     if fitted is None:
         return None
+
+    # For SLE: use target A+D to define the sustain window directly, since
+    # heuristic fitting of the sustain start is unreliable when D is long.
+    # Measure median envelope level in [A+D, note_off] — the true sustain phase.
+    SLE = abs(fitted["S_level"] - target_S)
+    if note_duration_ms is not None:
+        sustain_start_ms = target_A + target_D
+        note_off_ms      = note_duration_ms
+        if sustain_start_ms < note_off_ms:
+            ss = int(sustain_start_ms / 1000.0 * sample_rate)
+            se = int(note_off_ms      / 1000.0 * sample_rate)
+            se = min(se, len(envelope))
+            if se > ss:
+                env_norm = envelope / (envelope.max() + 1e-10)
+                fitted_S = float(np.median(env_norm[ss:se]))
+                SLE = abs(fitted_S - target_S)
+
     return {
         "ATE": abs(fitted["A_ms"]    - target_A),
         "DTE": abs(fitted["D_ms"]    - target_D),
-        "SLE": abs(fitted["S_level"] - target_S),
+        "SLE": SLE,
         "RTE": abs(fitted["R_ms"]    - target_R),
     }
 
