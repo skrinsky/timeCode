@@ -125,10 +125,10 @@ class ADSREstimator(nn.Module):
             audio = audio.unsqueeze(0)
         log_A, log_D, S, log_R = self(audio)
         return {
-            "A": torch.exp(log_A) - 1.0,
-            "D": torch.exp(log_D) - 1.0,
+            "A": (torch.exp(log_A) - 1.0).clamp(min=0.0),
+            "D": (torch.exp(log_D) - 1.0).clamp(min=0.0),
             "S": S,
-            "R": torch.exp(log_R) - 1.0,
+            "R": (torch.exp(log_R) - 1.0).clamp(min=0.0),
         }
 
     @torch.no_grad()
@@ -152,29 +152,33 @@ class ADSREstimator(nn.Module):
         was_training = self.training
         self.train()   # keep Dropout2d active
 
-        results_A, results_D, results_S, results_R = [], [], [], []
+        results_logA, results_logD, results_S, results_logR = [], [], [], []
         for _ in range(n_passes):
             log_A, log_D, S, log_R = self(audio)
-            results_A.append(torch.exp(log_A) - 1.0)
-            results_D.append(torch.exp(log_D) - 1.0)
+            results_logA.append(log_A)
+            results_logD.append(log_D)
             results_S.append(S)
-            results_R.append(torch.exp(log_R) - 1.0)
+            results_logR.append(log_R)
 
         if not was_training:
             self.eval()
 
         stack = lambda lst: torch.stack(lst, dim=0)   # [n_passes, batch]
+        mean_logA = stack(results_logA).mean(0)
+        mean_logD = stack(results_logD).mean(0)
+        mean_logR = stack(results_logR).mean(0)
         means = {
-            "A": stack(results_A).mean(0),
-            "D": stack(results_D).mean(0),
+            "A": (torch.exp(mean_logA) - 1.0).clamp(min=0.0),
+            "D": (torch.exp(mean_logD) - 1.0).clamp(min=0.0),
             "S": stack(results_S).mean(0),
-            "R": stack(results_R).mean(0),
+            "R": (torch.exp(mean_logR) - 1.0).clamp(min=0.0),
         }
+        # Variances in log space: range ~0–25, giving a sane confidence formula
         variances = {
-            "A": stack(results_A).var(0),
-            "D": stack(results_D).var(0),
+            "A": stack(results_logA).var(0),
+            "D": stack(results_logD).var(0),
             "S": stack(results_S).var(0),
-            "R": stack(results_R).var(0),
+            "R": stack(results_logR).var(0),
         }
         return means, variances
 
