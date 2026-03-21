@@ -185,8 +185,8 @@ Full grid = ~57M combinations (before velocity). Sample ~500K clips via stratifi
 ### 3b. Real instrument estimation layer (NSynth + inverse synthesis)
 
 Use inverse-synthesis tools (InverSynth, DiffMoog) to estimate ADSR from real recordings:
-- **NSynth Dataset** (Google Magenta) — 305,979 annotated notes across 1006 instruments. Run inverse synthesis to estimate A, D, S, R per clip. ~20% noise on Attack estimation, ~35% on Decay. Use only for fine-tuning, not as the foundation.
-- **URMP Dataset** — clean monophonic instrument stems, good timbral diversity.
+- **NSynth Dataset** (Google Magenta) — 305,979 annotated notes across 1006 instruments. Run the ADSR estimator (MC dropout confidence) to generate pseudo-labels. ~20% noise on Attack estimation, ~35% on Decay. Use only for fine-tuning, not as the foundation.
+- **URMP Dataset** — clean monophonic instrument stems, good timbral diversity. Not used in v1 — NSynth alone is sufficient for Stage 3. Potential v2 addition.
 
 ### 3c. AF3-based labeling pipeline for complex sounds (drums, foley) — Option B data strategy
 
@@ -266,14 +266,13 @@ The `adsr_confidence` field gates whether a pseudo-labeled example is included i
 
 ### 3f. Dataset sizing targets
 
-| Phase | Source | Clips | Quality |
+| Stage | Source | Clips | Quality |
 |-------|--------|-------|---------|
-| Option A Phase 1 | Synthetic synths | 500K | Ground truth |
-| Option A Phase 2 | NSynth estimated | 200K | Noisy labels |
-| Option A Phase 3 | URMP + augmentation | 100K | Mixed |
+| Option A Stage 1–2 | Synthetic synths (sine, saw, square, FM 2-op/4-op) | 500K | Ground truth |
+| Option A Stage 3 | NSynth estimated (pitched families only, confidence ≥ 0.5) | ~150–200K | Noisy pseudo-labels |
 | Option B eval | Human perceptual check (evaluation only, not training) | 100–200 | Pass/fail per clip |
 | Option B large | AF3 + estimator pseudo-labeled | 500K–1M | Filtered pseudo-labels |
-| **Option A total** | | **~800K** | |
+| **Option A total** | | **~650–700K** | |
 | **Option B total** | | **~1.5M** | |
 
 ### 3g. ADSR inference defaults
@@ -320,16 +319,24 @@ The per-cue output report (Stage 6 of inference pipeline) logs which fields were
 
 ### 4a. Three options and the recommended path
 
-**Option A: ADSR-Extended DDSP** ← Build this first
-Extend Google's DDSP with an explicit ADSR conditioning pathway. The envelope gate is analytic (not learned). Fast inference, small model, ADSR precision guaranteed. Limited to pitched/harmonic sounds. Good for v1.
+**Option A: ADSR-Extended DDSP** ← COMPLETED (proof-of-concept only, not the final model)
+Extend Google's DDSP with an explicit ADSR conditioning pathway. The envelope gate is analytic (not learned). Fast inference, small model, ADSR precision guaranteed. Limited to pitched/harmonic sounds.
 
-**Option B: Diffusion ControlNet Adapter** ← Upgrade path
-Add an ADSR ControlNet adapter to a frozen pretrained T2A backbone (ETTA). Higher perceptual quality, general sound design. ADSR conditioning is learned, not analytic. ~30–50M additional parameters. The lightweight adapter + CFG dropout approach is validated by Sketch2Sound (Adobe Research, ICASSP 2025) and Audio Palette (2024) for analogous time-varying conditioning on DiT backbones — this is an extension of a known-working pattern, not an untested architectural bet.
+**Status after Stages 1–3:** ATE (5ms) and DTE (10ms) pass their targets well — the timing machinery works. SLE and RTE fail due to a fundamental architectural limitation: the DDSP synthesizer's spectral energy varies across ADSR stages independently of the gate, so the gate's S value does not correspond to the sustain level in the output waveform. This is not fixable without normalizing the synthesizer output per-frame, which would remove natural amplitude evolution across ADSR stages. Additionally, NSynth (the fine-tuning dataset) is 16kHz — upsampling to 48kHz adds no information above 8kHz, capping timbral quality. DDSP cannot generate non-pitched sounds (car engines, foley, SFX) at all due to its harmonic-plus-noise synthesis model. Option A is retained as a timing/infrastructure reference but is not the production model.
 
-**Option C: DDSP + Diffusion Polish (hybrid)** ← Do not build first
-DDSP for guaranteed envelope, diffusion for timbral richness. Most complex; risk of Stage 2 altering the envelope shape.
+**Option B: Diffusion Envelope Adapter** ← Current path
+Add an ADSR envelope conditioning adapter to a frozen pretrained T2A backbone (Stable Audio Open). ADSR parameters are converted to a 1D loudness curve via the existing `adsr_gate_samples()` function, resampled to the VAE latent rate, and injected via a single trainable linear layer per the Sketch2Sound pattern (ICASSP 2025). General sound design — instruments, foley, SFX, environmental sounds all within scope.
 
-**Recommendation:** Option A as foundation. Option B as a separate parallel research track after Option A is validated.
+**Why Stable Audio Open instead of ETTA:**
+ETTA (NVIDIA ADLR, ICML 2025) was the original planned backbone. Its design space analysis provides individually validated architecture choices and it outputs 44.1kHz stereo via its VAE. However, ETTA weights have not been publicly released — the project page has said "coming soon" since October 2024 with no release as of March 2026. The GitHub repo (`NVIDIA/elucidated-text-to-audio`) contains training and inference code but no checkpoint download path. Stable Audio Open (Stability AI, arXiv:2407.14358) is available now on HuggingFace, outputs 44.1kHz stereo, supports up to 47 seconds, includes timing conditioning (start_seconds), and was trained on Freesound CC-licensed audio covering the full range of sounds this system targets — instruments, foley, SFX, ambiences. It is the practical backbone choice.
+
+**Why the adapter is simpler than originally planned:**
+The original plan described a ControlNet-style cross-attention adapter (~40M params). The Sketch2Sound paper (ICASSP 2025) demonstrates that a single linear layer per control signal, projecting to the latent channel dimension and added element-wise to noisy latents, is sufficient — and requires only ~40K fine-tuning steps. No cross-attention, no separate ADSR pathway, no duplicated transformer blocks. The ADSR → loudness curve mapping is already implemented in `adsr_gate_samples()`.
+
+**Option C: DDSP + Diffusion Polish (hybrid)** ← Dropped
+Complexity not justified given Option B's simpler and better-validated path.
+
+**Recommendation:** Option B with Stable Audio Open backbone and Sketch2Sound-style envelope adapter.
 
 ### 4b. Option A architecture in detail
 
@@ -393,103 +400,85 @@ Per-frame synthesis (DDSP frame rate, ~every 64 samples):
 
 ### 4c. Option B architecture in detail
 
-Option B extends the system to complex sounds (drums, foley, SFX) where DDSP's harmonic-plus-noise model is insufficient. The backbone is a pretrained T2A diffusion model (ETTA is the natural candidate given its design space analysis, but AudioLDM2 or Stable Audio also work). The ADSR conditioning is learned, not analytic — which requires both a stronger data strategy (Section 3c) and explicit architectural enforcement.
+Option B uses Stable Audio Open as the frozen backbone with a minimal ADSR envelope adapter inspired by Sketch2Sound (ICASSP 2025). The key architectural insight: ADSR parameters are not fed as discrete scalars to an encoder — they are converted to a 1D amplitude envelope curve (using the existing `adsr_gate_samples()` function) and injected as a time-varying signal, matching the latent sequence resolution of the VAE.
+
+**Why a loudness curve, not 4 scalars:**
+No published system directly accepts ADSR as discrete parameters — the conditioning interface that works is a time-varying curve. But ADSR → loudness curve is a trivial forward pass: `adsr_gate_samples(A, D, S, R, note_duration, n_samples, sample_rate)` already computes this exactly. The curve is then resampled to the VAE latent frame rate (~21.5 Hz for Stable Audio). The ADSR inference system (`adsr_inferer.py`, `adsr_defaults.py`) and all timecode infrastructure remain unchanged.
+
+**Why this is sound-type agnostic:**
+A car engine purr with A=200ms, S=0.8, R=500ms is just a loudness curve the model follows. The model doesn't need to know it's a car engine — text conditioning handles that. The envelope curve is the same concept regardless of sound type. This is why Stable Audio Open (trained on Freesound, covering instruments, SFX, foley, ambiences) is the right backbone: it can generate any of these sounds from text alone, and the adapter steers the amplitude envelope.
 
 ```
 Inputs:
-  text_prompt       → CLAP or T5 text encoder (frozen)   → timbre_embedding [512–1024]
-  # Note: AF3 is an audio-in model (processes audio, not text) — not used here.
-  # ETTA uses T5 for text conditioning; CLAP is an alternative if music-text alignment matters.
-  (A, D, S, R, dur) → ADSREncoder (2-layer MLP)          → adsr_vector [128]
+  text_prompt            → T5 text encoder (frozen, part of Stable Audio Open)
+                         → text_embedding [used by existing cross-attention — unchanged]
+
+  (A, D, S, R, note_dur) → adsr_gate_samples()
+                         → envelope_curve [T_samples]       # 1D amplitude curve
+                         → resample to VAE latent rate (~21.5 Hz)
+                         → envelope_latent [T_latent, 1]
+                         → Linear(1, latent_channels)       # single trainable linear layer
+                         → envelope_embedding [T_latent, latent_channels]
 
 Backbone:
-  Frozen pretrained T2A DiT (e.g., ETTA-DiT, 1.29B params)
-  — weights frozen, only the ControlNet adapter trains
+  Frozen Stable Audio Open DiT
+  — weights frozen, only the Linear layer trains
 
-ADSR ControlNet adapter (~40M params, trains from scratch):
-  adsr_vector → project to DiT hidden dim → adsr_kv (key/value for cross-attention)
+At each denoising step:
+  noisy_latent += envelope_embedding   # element-wise addition, matching Sketch2Sound
 
-  In each DiT transformer block:
-    x = AdaLayerNorm(x, text_embedding)        # existing text pathway — weights frozen, unchanged
-    x = x + CrossAttention(x, adsr_kv)         # separate ADSR pathway — additive, trains from scratch
+Training losses:
+  - Standard flow matching / diffusion loss (unchanged from backbone)
+  - Confidence-weighted: scale loss by adsr_confidence where pseudo-labels are used
+  - Control dropout: 20% probability of zeroing envelope_embedding per clip
+    (enables CFG over the envelope signal at inference)
+  - Random median filter (window 1–25 latent frames) applied to envelope_latent during training
+    (from Sketch2Sound — teaches model to follow imprecise/sketched curves gracefully)
 
-  Why separate pathways:
-  - AdaLayerNorm for both signals would fuse them before the transformer sees them,
-    letting the model learn to weight text heavily and ADSR lightly (path of least resistance
-    given the pretrained backbone's text prior). Additive cross-attention cannot be
-    "overridden" the same way — it contributes independently at every block.
-  - The pretrained backbone's text conditioning is completely undisturbed (frozen AdaLayerNorm).
-  - ADSR guidance scale at inference has a cleaner effect when the pathway is separate.
-  - Gradients for ADSR and text flow through distinct paths during training.
+Classifier-free guidance over envelope at inference:
+  At each denoising step:
+    v_null = model(x_t, t, text=prompt, envelope=zeros)
+    v_full = model(x_t, t, text=prompt, envelope=envelope_embedding)
+    v_guided = v_null + envelope_guidance_scale × (v_full - v_null)
+  envelope_guidance_scale default: 3.0 (separate from text guidance scale)
+  Cost: 2× forward passes per step. Mitigate by applying only on first 50% of steps.
 
-Training losses (Option B):
-  - Standard diffusion loss (flow matching objective, matching ETTA's OT-CFM)
-  - Confidence-weighted loss:
-      Scale each training example's loss by adsr_confidence score from the pseudo-label pipeline.
-      Low-confidence pseudo-labels contribute less to gradient updates.
-
-  Note: No ADSR inverse-prediction auxiliary loss. Sketch2Sound and Audio Palette both show that
-  a lightweight adapter + CFG dropout is sufficient to prevent the text prior from overriding
-  explicit conditioning — no auxiliary loss through the denoising loop is needed (and it would
-  be non-differentiable through the full OT-CFM trajectory anyway). The ADSR-guided CFG at
-  inference is the primary mechanism for enforcing conditioning strength.
-
-ADSR-guided classifier-free guidance at inference (novel):
-  Applied inside the denoising loop at each diffusion step, not post-generation.
-  At each step t, predict the score/flow field twice:
-    v_null = model(x_t, t, text=prompt, adsr=null_adsr)
-    v_full = model(x_t, t, text=prompt, adsr=input_adsr)
-    v_guided = v_null + adsr_guidance_scale × (v_full - v_null)
-  Use v_guided to take the denoising step.
-  This is analogous to text CFG but applied to the ADSR conditioning signal,
-  and must operate on the flow field at each step — not on the final decoded audio.
-  adsr_guidance_scale is a separate hyperparameter from text guidance scale (default: 3.0).
-  Cost: doubles inference compute (two forward passes per step). Can be mitigated by
-  applying ADSR guidance only on the first half of denoising steps where structure forms.
+Velocity:
+  Applied as a scalar multiplier to envelope_curve before resampling.
+  velocity=1.0 → curve as computed; velocity=0.5 → all values halved.
+  Simple and deterministic; does not require a separate conditioning pathway.
 ```
-
-**Why ETTA as the backbone:**
-ETTA's design space analysis (the "elucidated" paper) means its architecture choices are individually validated — you know what each component does and why. The RoPE positional embeddings and OT-CFM training objective are compatible with the per-step AdaLayerNorm injection used by the ControlNet adapter. ETTA also outputs 44.1 kHz stereo via its VAE, which matches the post-production target format.
 
 **Frozen vs. partially unfrozen backbone — decision tree:**
 
-Start fully frozen. Only unfreeze if the ADSR sensitivity test fails. The goal is to do the minimum unfreezing necessary — the backbone's pretrained weights are expensive to recover if degraded.
+Start fully frozen. Only unfreeze if the ADSR sensitivity test fails.
 
 ```
-Step 1: Train fully frozen for 50K steps.
+Step 1: Train fully frozen for 40K steps.
 
 Step 2: ADSR sensitivity test.
   Generate the same prompt with A=10ms vs A=500ms.
-  → ATE < 60ms:   adapter is working. Stay frozen. Continue training.
-  → ATE > 100ms:  adapter alone is insufficient. Proceed to Step 3.
+  → ATE < 60ms:   adapter is working. Stay frozen. Done.
+  → ATE > 100ms:  adapter alone insufficient. Proceed to Step 3.
 
-Step 3: Unfreeze last 4 layers (layers 21–24 of 24).
-  Use discriminative learning rates — smaller for backbone layers
-  to limit how much they drift from their pretrained values:
-    Adapter:               lr = 1e-4  (unchanged)
-    Unfrozen layers 21–24: lr = 1e-5  (10× lower)
-  Add L2-to-init regularization on the unfrozen layers:
-    loss += λ * ||current_weights - pretrained_weights||²
-    (λ = 1e-3 as starting point)
-  This keeps unfrozen layers close to their pretrained position
-  while still allowing small ADSR-relevant adjustments.
+Step 3: Unfreeze last 4 transformer layers.
+  Discriminative LRs:
+    Adapter Linear:        lr = 1e-4
+    Unfrozen last 4 layers: lr = 1e-5
+  L2-to-init regularization on unfrozen layers (λ = 1e-3).
+  Train another 20K steps.
 
-Step 4: Train for another 50K steps.
+Step 4: Two-check gate.
+  a. ATE < 100ms?
+  b. FAD on held-out general audio degraded < 20%?
+  → Both passing: done.
+  → ATE still failing: unfreeze last 8 layers. Repeat.
+  → FAD degrading: reduce backbone lr to 5e-6, increase λ to 3e-3. Repeat.
 
-Step 5: Two-check gate.
-  a. ADSR sensitivity test:   is ATE now < 100ms?
-  b. Generation quality check: has FAD on held-out general audio degraded > 20%?
-
-  → ADSR passing + FAD stable:   done.
-  → ADSR still failing:           unfreeze layers 17–24 (last 8). Repeat from Step 4.
-  → FAD degrading:                reduce unfrozen lr to 5e-6, increase λ to 3e-3. Repeat.
-
-Hard ceiling: never unfreeze more than 12 of 24 layers.
-Early layers encode low-level acoustic features that the entire backbone depends on.
-Unfreezing them risks degrading general generation quality irreversibly.
+Hard ceiling: never unfreeze more than half the DiT layers.
 ```
 
-**Why this works:** Transformer layers do different jobs at different depths. Early layers extract low-level acoustic structure (frequencies, temporal patterns). Later layers handle high-level semantics ("what is this sound's character"). ADSR is a high-level semantic concept, so the last few layers are where unfreezing has the most effect with the least risk. The L2-to-init term acts as a leash — the unfrozen layers can adjust, but only within a bounded radius of their pretrained values.
+**Parameter count:** The single Linear layer is negligible (~latent_channels parameters, typically 64–512). Total trainable parameters: well under 1M for the adapter alone. This is the key advantage over the original ControlNet plan (~40M params): faster to train, less risk of disrupting the frozen backbone.
 
 ---
 
@@ -553,7 +542,7 @@ Multiple cues may overlap in time. Generate each independently, sum (mix) into t
 - **Multi-scale spectral loss (MSS):** L1 on STFT magnitudes at FFT sizes {64, 128, 256, 512, 1024, 2048}. Primary loss. Captures timbral quality across frequency scales.
 - **Envelope reconstruction loss:** Removed. Since the ADSR gate is analytic, the output envelope is the ADSR envelope by construction — this loss is trivially satisfied and contributes no learning signal. If synthesis quality is poor (near-zero output), the MSS loss catches it.
 
-**Optimizer:** AdamW, lr=1e-4, cosine decay, weight decay=1e-5. Batch size: 64 clips (2–4s each). ~500K steps on a single A100.
+**Optimizer:** AdamW, lr=1e-4, cosine decay, weight decay=1e-5. Batch size: 16 clips (6s each, trimmed/padded). ~400K steps. (Note: 64 clips was an early estimate before memory constraints were measured on the 4090; 16 is the actual value used in all training scripts.)
 
 ### 6b. Training curriculum
 
@@ -684,11 +673,11 @@ Stage 6: Output
 - Per-cue generation: ~10–50ms per 2s clip on A100
 - 20-cue list → 10-min output: < 2 seconds total
 
-**Option B (ETTA DiT, 1.29B params):**
-- Per-cue generation: ~2–5 seconds per clip (multiple diffusion steps)
-- With ADSR-guided CFG (2× forward passes per step): ~4–10 seconds per clip
+**Option B (Stable Audio Open DiT):**
+- Per-cue generation: ~2–5 seconds per clip (multiple diffusion steps) on A100
+- With envelope CFG (2× forward passes per step): ~4–10 seconds per clip
 - 20-cue list: 80–200 seconds on a single A100
-- Mitigation: apply ADSR guidance only on first 50% of denoising steps; batch cues; use fewer steps (25 vs 50) with quality tradeoff
+- Mitigation: apply envelope guidance only on first 50% of denoising steps; batch cues; use fewer steps (25 vs 50) with quality tradeoff
 
 Both options are offline pre-production use. Real-time streaming is out of scope.
 
@@ -698,7 +687,7 @@ Both options are offline pre-production use. Real-time streaming is out of scope
 
 ### Risk: ADSR semantics break for non-musical sounds
 
-ADSR originated in subtractive synthesis. "Explosion", "thunder", "crowd cheer" have semantically ambiguous decay/release stages. **Mitigation for v1 (Option A):** restrict scope to musical instrument notes and short discrete sound effects. **Mitigation for Option B:** the AF3 + estimator pipeline filters out low-confidence pseudo-labels — sounds where ADSR is semantically ambiguous will produce high estimator variance and get dropped. This is a feature, not a bug: the training data self-selects to sounds where ADSR is a meaningful descriptor.
+ADSR originated in subtractive synthesis. "Explosion", "thunder", "crowd cheer" have semantically ambiguous decay/release stages. **Mitigation for Option B:** the AF3 + estimator pipeline filters out low-confidence pseudo-labels — sounds where ADSR is semantically ambiguous will produce high estimator variance and get dropped. This is a feature, not a bug: the training data self-selects to sounds where ADSR is a meaningful descriptor. Note: Option A's restriction to musical instruments is no longer a constraint — Option B (Stable Audio Open) handles all sound types.
 
 ### Risk: CLAP encoder doesn't generalize to instrument+note descriptions
 
@@ -722,13 +711,13 @@ FreeSound clips carry individual per-file licenses (CC0, CC-BY, CC-BY-NC, etc.).
 
 The plan specifies piecewise-linear ADSR throughout. Real synthesizers typically use exponential curves for A, D, and R — linear ramps can sound unnatural, especially for release tails longer than ~200ms. This is a deliberate v1 simplification. If linear envelopes sound mechanical during evaluation, replacing them with exponential curves is a straightforward swap in `envelope.py` without affecting any other component. Document the choice explicitly so it is not mistaken for an architectural constraint.
 
-### Risk (Option B): Diffusion model ignores ADSR conditioning
+### Risk (Option B): Diffusion model ignores envelope conditioning
 
-Strong text priors may override ADSR conditioning when the model has already "seen" what a piano sounds like. **Mitigation:** ADSR-guided CFG at inference (primary mechanism) + ADSR perturbation augmentation during training (from Sketch2Sound). Sketch2Sound and Audio Palette both demonstrate that a lightweight adapter + CFG dropout on a frozen DiT backbone is sufficient to enforce explicit conditioning without an auxiliary loss.
+Strong text priors may override envelope conditioning. **Mitigation:** envelope CFG at inference (primary mechanism) + control dropout during training (per Sketch2Sound). The median filter augmentation during training is critical — it teaches the model to follow imprecise curves, which prevents overfitting to exact curve shapes and reduces the risk of the text prior overriding coarse envelope structure.
 
-### V2 path: inference-time ADSR guidance without fine-tuning (DITTO)
+### V2 path: inference-time envelope guidance without fine-tuning (DITTO-2)
 
-**DITTO** (Novack et al., ICML 2024) optimizes the initial noise latent at inference by backpropagating through the denoising loop toward any differentiable loss target — no model retraining needed. Applied to this system: define a differentiable envelope matching loss between generated audio and the target ADSR curve, then use DITTO to steer the noise latent per cue. DITTO-2 (ISMIR 2024) makes this 10–20× faster. This would allow ADSR-guided generation on top of an unmodified ETTA backbone with no adapter training — useful as a no-training baseline or for rapid prototyping of new ADSR conditioning strategies.
+**DITTO-2** (Novack et al., ISMIR 2024) optimizes the initial noise latent at inference by backpropagating through a distilled 1-step surrogate model, then uses the optimized latent for full multi-step sampling. Applied to this system: define a differentiable RMS envelope matching loss against the target ADSR curve, steer the noise latent per cue. DITTO-2 runs 10–20× faster than DITTO (5–22 seconds vs. 82–245 seconds). This provides ADSR-guided generation on top of an unmodified Stable Audio Open backbone with no adapter training — useful as a no-training baseline or fallback if the adapter underperforms.
 
 ### Known limitation: ADSR is too coarse for nuanced sound design
 
@@ -742,15 +731,16 @@ Three CueEvents at the same timecode (e.g., a chord) produce three independently
 
 ## 10. Implementation Phases
 
-| Phase | Duration | Deliverable |
-|-------|----------|-------------|
-| 0: Infrastructure | 2 weeks | SMPTE parser + unit tests (incl. 23.976 and 29.97 DF edge cases), CueEvent schema with optional ADSR fields, adsr_defaults.py lookup table, adsr_inferer.py, BPM resolver (constant BPM + musical duration values), evaluation harness, data generation scripts with A+D < note_duration constraint |
-| 1: DDSP Baseline (Option A) | 4 weeks | Working ADSR-DDSP model, trained on 500K synthetic clips, Option A ATE/DTE/SLE/RTE targets passing |
-| 2: Inference Pipeline | 2 weeks | CueList → WAV pipeline end-to-end, per-cue seed, text embedding cache, 20-cue example working |
-| 3: Real Instrument Fine-tuning | 3 weeks | NSynth fine-tuning, CLAP + FAD evaluation, MOS study |
-| 4: ADSR Estimator + AF3 Labeling Pipeline | 3 weeks | Waveform-to-ADSR regressor trained on synthetic with log-scale MSE; MC dropout confidence with Platt calibration; AF3 sound type labels working; **data license audit completed**; human perceptual evaluation gate (~100–200 clips, pass/fail only) run before scaling |
-| 5: Pseudo-label + Dataset Validation | 3 weeks | AF3 + estimator pipeline running over licensed unlabeled foley/drum libraries; confidence filtering; ~500K–1M labeled pairs; estimator pass rate > 80% confirmed before scaling |
-| 6: Diffusion Upgrade (Option B) | 6 weeks | ETTA backbone + ADSR ControlNet adapter; ADSR-guided CFG inside denoising loop; Option B metric targets; comparative evaluation vs. Option A |
+| Phase | Status | Deliverable |
+|-------|--------|-------------|
+| 0: Infrastructure | ✅ Complete | SMPTE parser + unit tests, CueEvent schema, adsr_defaults.py, adsr_inferer.py, BPM resolver, evaluation harness, data generation scripts |
+| 1: DDSP Baseline (Option A) | ✅ Complete | ADSR-DDSP model trained on 500K synthetic clips through Stages 1–3. ATE=5ms ✓, DTE=10ms ✓. SLE and RTE fail due to fundamental DDSP architecture limits (spectral energy varies with stage, NSynth is 16kHz). Model retained as timing/infrastructure reference only. |
+| 2: ADSR Estimator | ✅ Complete | Waveform-to-ADSR CNN regressor; MC dropout confidence (fixed: log-space variance); 143,861 NSynth clips above confidence 0.5 pseudo-labeled |
+| 3: Stable Audio Open adapter (Option B) | 🔜 Next | Download Stable Audio Open weights; implement single Linear envelope adapter per Sketch2Sound pattern; train ~40K steps on synthetic envelope+audio pairs; ADSR sensitivity test (A=10ms vs A=500ms); Option B metric targets |
+| 4: Inference Pipeline | 🔜 | CueList → WAV pipeline end-to-end with Stable Audio Open backbone; per-cue seed; text embedding cache; timecode alignment; 20-cue example working |
+| 5: Foley/SFX Pseudo-label Dataset | 🔜 | AF3 + estimator pipeline over licensed unlabeled foley/drum libraries (Freesound CC0); confidence filtering; ~500K–1M labeled pairs; estimator pass rate > 80% gate; **data license audit completed before scaling** |
+| 6: Fine-tuning on Pseudo-labels | 🔜 | Fine-tune adapter on foley/SFX pseudo-labels; confidence-weighted loss; evaluate on non-musical sound prompts ("car engine purr", "door creak", "rain"); CLAP + FAD + MOS |
+| 7: DITTO-2 baseline (optional) | 🔜 | Inference-time envelope optimization on unmodified Stable Audio Open; compare vs. adapter approach; useful if adapter underperforms on edge cases |
 
 ---
 
@@ -769,8 +759,8 @@ timecode_audio/
     adsr_encoder.py      # ADSR scalars → stage_position(t) per frame; also projects adsr_vector for Option B
     adsr_estimator.py    # Waveform-to-ADSR regressor: mel-spectrogram → (A, D, S, R); used for pseudo-labeling
     text_encoder.py      # CLAP/T5 wrapper (frozen weights); note: CLAP trained at 48kHz — resample inputs
-    ddsp_synthesizer.py  # Option A: ADSR-extended DDSP backbone (operates at 16kHz internally — upsample output)
-    etta_controlnet.py   # Option B: ETTA-DiT backbone + ADSR cross-attention ControlNet adapter
+    ddsp_synthesizer.py       # Option A: ADSR-extended DDSP backbone (reference only — not production model)
+    stable_audio_adapter.py   # Option B: Stable Audio Open backbone + single Linear envelope adapter (Sketch2Sound pattern)
     losses.py            # MSS loss (Option A); OT-CFM + confidence-weighted (Option B)
   data/
     synthetic_gen.py     # Programmatic synth data generation
