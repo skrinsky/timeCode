@@ -84,32 +84,47 @@ def fit_adsr_to_envelope(
 
     env_norm = envelope / (envelope.max() + 1e-10)
 
+    n = len(env_norm)
+
     # Attack: time to first peak
     peak_idx = int(np.argmax(env_norm))
     A_ms = peak_idx / sample_rate * 1000.0
 
-    # Sustain level: median of the middle third of the envelope
-    # (avoids attack transient and release tail)
-    n = len(env_norm)
-    mid = env_norm[n // 3 : 2 * n // 3]
+    # Note-off sample (where release begins)
+    # If note_duration_ms is known, use it directly; otherwise fall back to 2/3 of clip.
+    if note_duration_ms is not None:
+        note_off_idx = min(int(note_duration_ms / 1000.0 * sample_rate), n - 1)
+    else:
+        note_off_idx = 2 * n // 3
+
+    # Sustain level: median of envelope in the sustain window
+    # [end of decay → note_off], i.e. the second half of the note body.
+    sustain_start = peak_idx + max(1, (note_off_idx - peak_idx) // 2)
+    sustain_end   = note_off_idx
+    if sustain_end > sustain_start:
+        mid = env_norm[sustain_start:sustain_end]
+    else:
+        mid = env_norm[peak_idx:note_off_idx] if note_off_idx > peak_idx else env_norm
     S_level = float(np.median(mid)) if len(mid) > 0 else 0.0
 
-    # Decay: time from peak to sustain level crossing
+    # Decay: time from peak to sustain level crossing (search only within note body)
     decay_target = S_level + (1.0 - S_level) * 0.1   # 90% of the way to sustain
     D_ms = 0.0
-    for i in range(peak_idx, min(peak_idx + int(sample_rate), n)):
+    search_end = min(note_off_idx, peak_idx + int(sample_rate))
+    for i in range(peak_idx, search_end):
         if env_norm[i] <= decay_target:
             D_ms = (i - peak_idx) / sample_rate * 1000.0
             break
 
-    # Release: time from sustain end to silence
-    # Find where envelope first drops below 5% of peak (after middle of clip)
-    release_start = 2 * n // 3
+    # Release: time from note-off until envelope drops below 5% of peak
     R_ms = 0.0
-    for i in range(release_start, n):
+    for i in range(note_off_idx, n):
         if env_norm[i] < 0.05:
-            R_ms = (n - i) / sample_rate * 1000.0
+            R_ms = (i - note_off_idx) / sample_rate * 1000.0
             break
+    else:
+        # Never dropped below 5% — release longer than remaining clip
+        R_ms = (n - note_off_idx) / sample_rate * 1000.0
 
     return {"A_ms": A_ms, "D_ms": D_ms, "S_level": S_level, "R_ms": R_ms}
 
@@ -125,13 +140,14 @@ def compute_adsr_error(
     target_S: float,
     target_R: float,
     sample_rate: int,
+    note_duration_ms: float | None = None,
 ) -> dict[str, float] | None:
     """
     Compute ATE/DTE/SLE/RTE for a single generated clip.
     Returns None if envelope fitting fails.
     """
     envelope = extract_amplitude_envelope(audio, sample_rate)
-    fitted = fit_adsr_to_envelope(envelope, sample_rate)
+    fitted = fit_adsr_to_envelope(envelope, sample_rate, note_duration_ms=note_duration_ms)
     if fitted is None:
         return None
     return {
@@ -143,12 +159,13 @@ def compute_adsr_error(
 
 
 def compute_batch_adsr_errors(
-    audio_batch: torch.Tensor,    # [N, n_samples]
-    A_targets:   torch.Tensor,    # [N] ms
-    D_targets:   torch.Tensor,    # [N] ms
-    S_targets:   torch.Tensor,    # [N]
-    R_targets:   torch.Tensor,    # [N] ms
-    sample_rate: int = 48000,
+    audio_batch:      torch.Tensor,          # [N, n_samples]
+    A_targets:        torch.Tensor,          # [N] ms
+    D_targets:        torch.Tensor,          # [N] ms
+    S_targets:        torch.Tensor,          # [N]
+    R_targets:        torch.Tensor,          # [N] ms
+    sample_rate:      int = 48000,
+    note_durations:   torch.Tensor | None = None,  # [N] ms
 ) -> ADSRErrors:
     """
     Compute ADSR reconstruction errors for a batch of generated clips.
@@ -163,11 +180,14 @@ def compute_batch_adsr_errors(
     D_np = D_targets.detach().cpu().numpy()
     S_np = S_targets.detach().cpu().numpy()
     R_np = R_targets.detach().cpu().numpy()
+    dur_np = note_durations.detach().cpu().numpy() if note_durations is not None else None
 
     for i in range(len(audio_np)):
+        note_dur_ms = float(dur_np[i]) if dur_np is not None else None
         err = compute_adsr_error(
             audio_np[i], float(A_np[i]), float(D_np[i]),
-            float(S_np[i]), float(R_np[i]), sample_rate
+            float(S_np[i]), float(R_np[i]), sample_rate,
+            note_duration_ms=note_dur_ms,
         )
         if err is None:
             continue

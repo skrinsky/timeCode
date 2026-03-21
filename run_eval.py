@@ -73,7 +73,7 @@ def main():
     loader = DataLoader(val_subset, batch_size=args.batch_size, shuffle=False)
     print(f"Evaluating {n_eval} clips...")
 
-    all_audio, all_A, all_D, all_S, all_R = [], [], [], [], []
+    all_audio, all_A, all_D, all_S, all_R, all_dur = [], [], [], [], [], []
 
     with torch.no_grad():
         for batch in loader:
@@ -124,16 +124,19 @@ def main():
             all_D.append(D.cpu())
             all_S.append(S.cpu())
             all_R.append(R.cpu())
+            all_dur.append(note_dur.cpu())
 
     audio_batch = torch.cat(all_audio, dim=0)
-    A_batch = torch.cat(all_A, dim=0)
-    D_batch = torch.cat(all_D, dim=0)
-    S_batch = torch.cat(all_S, dim=0)
-    R_batch = torch.cat(all_R, dim=0)
+    A_batch     = torch.cat(all_A,    dim=0)
+    D_batch     = torch.cat(all_D,    dim=0)
+    S_batch     = torch.cat(all_S,    dim=0)
+    R_batch     = torch.cat(all_R,    dim=0)
+    dur_batch   = torch.cat(all_dur,  dim=0)
 
     errors = compute_batch_adsr_errors(
         audio_batch, A_batch, D_batch, S_batch, R_batch,
         sample_rate=config.sample_rate,
+        note_durations=dur_batch,
     )
     print_adsr_report(errors, label="Stage 3 final (synthetic val set)")
 
