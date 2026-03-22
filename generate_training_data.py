@@ -20,7 +20,18 @@ import math
 import os
 import random
 import sys
+import types
 from pathlib import Path
+
+# k_diffusion (dep of stable-audio-tools) imports openai-clip which uses
+# pkg_resources — removed in Python 3.12+. Shim it before the import chain fires.
+try:
+    import pkg_resources  # noqa: F401
+except ImportError:
+    import packaging as _packaging
+    _mod = types.ModuleType("pkg_resources")
+    _mod.packaging = _packaging
+    sys.modules["pkg_resources"] = _mod
 
 import torch
 import torchaudio

@@ -14,10 +14,22 @@ enabling classifier-free guidance over the envelope at inference.
 from __future__ import annotations
 import math
 import json
+import sys
+import types
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pathlib import Path
+
+# k_diffusion (dep of stable-audio-tools) imports openai-clip which uses
+# pkg_resources — removed in Python 3.12+. Shim it before the import chain fires.
+try:
+    import pkg_resources  # noqa: F401
+except ImportError:
+    import packaging as _packaging
+    _mod = types.ModuleType("pkg_resources")
+    _mod.packaging = _packaging
+    sys.modules["pkg_resources"] = _mod
 from torch.utils.data import DataLoader, random_split
 
 from timecode_audio.model.stable_audio_adapter import EnvelopeAdapter
