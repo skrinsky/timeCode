@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -161,13 +162,17 @@ def generate_clips(
     """Generate a batch of clips. Returns list of [2, n_samples] tensors."""
     from stable_audio_tools.inference.generation import generate_diffusion_cond
 
-    sample_size = model_config["sample_size"]
     sample_rate = model_config["sample_rate"]
 
     conditioning = [
         {"prompt": prompt, "seconds_start": 0, "seconds_total": dur}
         for prompt, dur in prompts_with_durations
     ]
+
+    # Use the max clip duration in this batch as sample_size — not the 47s model max.
+    # Round up to next multiple of 2048 so the VAE produces clean latent frames.
+    max_dur_samples = max(int(dur * sample_rate) for _, dur in prompts_with_durations)
+    sample_size = math.ceil(max_dur_samples / 2048) * 2048
 
     output = generate_diffusion_cond(
         model,

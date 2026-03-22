@@ -20,6 +20,7 @@ Returns:
 
 from __future__ import annotations
 import json
+import math
 import random
 import soundfile as sf
 import numpy as np
@@ -36,7 +37,6 @@ from timecode_audio.model.stable_audio_adapter import (
 )
 
 MAX_DURATION_S  = 47.0      # Stable Audio Open max clip length
-MAX_SAMPLES     = int(MAX_DURATION_S * SAMPLE_RATE)
 
 
 class AdapterDataset(Dataset):
@@ -54,9 +54,9 @@ class AdapterDataset(Dataset):
         augment: bool = True,
         max_duration_s: float = MAX_DURATION_S,
     ) -> None:
-        self.data_dir = Path(data_dir)
-        self.augment  = augment
-        self.max_samples = int(max_duration_s * SAMPLE_RATE)
+        self.data_dir    = Path(data_dir)
+        self.augment     = augment
+        self.max_samples = int(max_duration_s * SAMPLE_RATE)  # hard cap only
 
         meta_path = self.data_dir / "metadata.jsonl"
         self.records: list[dict] = []
@@ -91,11 +91,8 @@ class AdapterDataset(Dataset):
         if sr != SAMPLE_RATE:
             waveform = torchaudio.functional.resample(waveform, sr, SAMPLE_RATE)
 
-        # Pad or trim to max_samples
-        n = waveform.shape[1]
-        if n < self.max_samples:
-            waveform = torch.nn.functional.pad(waveform, (0, self.max_samples - n))
-        else:
+        # Trim to hard max (don't pad here — collate_fn pads to batch max)
+        if waveform.shape[1] > self.max_samples:
             waveform = waveform[:, :self.max_samples]
 
         # --- Compute envelope from mono mix at latent frame rate ---
@@ -115,24 +112,40 @@ class AdapterDataset(Dataset):
 
 
 def collate_fn(batch: list[dict]) -> dict:
-    """Pad envelopes to the same length within a batch."""
-    max_env_len = max(b["envelope"].shape[0] for b in batch)
+    """
+    Pad audio and envelopes to the same length within a batch.
+
+    Audio is padded to the next multiple of VAE_DOWNSAMPLE (2048) so that
+    all clips in the batch produce the same T_latent after VAE encoding.
+    Envelope is padded to that same T_latent.
+    """
+    # Compute batch-max audio length, rounded up to VAE frame boundary
+    max_audio = max(b["audio"].shape[1] for b in batch)
+    max_audio = math.ceil(max_audio / VAE_DOWNSAMPLE) * VAE_DOWNSAMPLE
+    max_env   = max_audio // VAE_DOWNSAMPLE
 
     audios, envelopes, texts, durations = [], [], [], []
     for b in batch:
-        audios.append(b["audio"])
+        # Pad audio
+        audio = b["audio"]
+        pad_a = max_audio - audio.shape[1]
+        if pad_a > 0:
+            audio = torch.nn.functional.pad(audio, (0, pad_a))
+        audios.append(audio)
+
+        # Pad envelope
         env = b["envelope"]
-        # Pad envelope to max length
-        pad = max_env_len - env.shape[0]
-        if pad > 0:
-            env = torch.nn.functional.pad(env, (0, pad))
+        pad_e = max_env - env.shape[0]
+        if pad_e > 0:
+            env = torch.nn.functional.pad(env, (0, pad_e))
         envelopes.append(env)
+
         texts.append(b["text_prompt"])
         durations.append(b["seconds_total"])
 
     return {
-        "audio":        torch.stack(audios),        # [B, 2, n_samples]
-        "envelope":     torch.stack(envelopes),     # [B, T_latent]
+        "audio":        torch.stack(audios),        # [B, 2, max_audio]
+        "envelope":     torch.stack(envelopes),     # [B, max_env]
         "text_prompt":  texts,
         "seconds_total": torch.tensor(durations, dtype=torch.float32),
     }

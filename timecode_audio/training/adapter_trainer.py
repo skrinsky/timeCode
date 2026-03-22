@@ -221,12 +221,8 @@ class AdapterTrainer:
         # 5. Get text+timing conditioning
         cond = self._get_conditioning(texts, seconds_total)
 
-        # 6. Forward through frozen DiT
-        with torch.no_grad():
-            # Temporarily re-enable grad for the noisy_latents path only
-            pass
-        # The DiT is frozen but we need gradients through adapter_embed.
-        # noisy_latents_adapted = noisy_latents (no grad) + adapter_embed (has grad)
+        # 6. Forward through frozen DiT (outside no_grad so grads flow to adapter_embed)
+        # DiT params have requires_grad=False so only adapter gets updated.
         model_output = self.sa_model.model(noisy_latents_adapted, t, cond)
 
         # 7. V-prediction loss
