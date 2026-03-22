@@ -104,8 +104,8 @@ class AdapterDataset(Dataset):
             envelope = apply_median_filter(envelope, window_size=None, max_window=25)
 
         return {
-            "audio":        waveform,           # [2, max_samples]
-            "envelope":     envelope,           # [T_latent]
+            "audio":        waveform,           # [2, n_samples] (variable; collate_fn pads to batch max)
+            "envelope":     envelope,           # [T_latent] (variable; collate_fn pads to batch max)
             "text_prompt":  text_prompt,
             "seconds_total": seconds_total,
         }
