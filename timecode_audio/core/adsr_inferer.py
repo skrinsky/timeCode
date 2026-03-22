@@ -28,16 +28,17 @@ logger = logging.getLogger(__name__)
 
 def infer_adsr(
     cue: CueEvent,
-    next_cue_onset_ms: Optional[float] = None,
+    next_cue_gap_ms: Optional[float] = None,
 ) -> ResolvedCueEvent:
     """
     Resolve all null ADSR fields and return a ResolvedCueEvent.
 
     Parameters
     ----------
-    cue              : CueEvent with possibly null ADSR fields
-    next_cue_onset_ms: onset time (ms) of the following cue, used for
-                       duration inference. None if this is the last cue.
+    cue             : CueEvent with possibly null ADSR fields
+    next_cue_gap_ms : time gap (ms) from this cue's onset to the next cue's
+                      onset (i.e. next_onset_ms - this_onset_ms). Used for
+                      duration inference. None if this is the last cue.
 
     Returns
     -------
@@ -83,7 +84,7 @@ def infer_adsr(
     velocity = resolve("velocity", cue.velocity)
 
     # Duration resolution
-    duration_ms = _resolve_duration(cue, A, D, R, next_cue_onset_ms, instrument, inferred)
+    duration_ms = _resolve_duration(cue, A, D, R, next_cue_gap_ms, instrument, inferred)
 
     if inferred:
         logger.debug("Cue %r — inferred fields: %s", text, inferred)
@@ -101,7 +102,7 @@ def _resolve_duration(
     A: float,
     D: float,
     R: float,
-    next_cue_onset_ms: Optional[float],
+    next_cue_gap_ms: Optional[float],
     instrument: dict[str, float],
     inferred: list[str],
 ) -> float:
@@ -118,9 +119,10 @@ def _resolve_duration(
 
     inferred.append("duration_ms")
 
-    # Next-cue gap (gap minus R so sounds don't overlap into next cue)
-    if next_cue_onset_ms is not None:
-        gap = next_cue_onset_ms - R
+    # Duration = time-to-next-cue minus release so the tail ends just before
+    # the next cue's onset (next_cue_gap_ms is relative: next_onset - this_onset).
+    if next_cue_gap_ms is not None:
+        gap = next_cue_gap_ms - R
         if gap > 0:
             return gap
 
@@ -160,7 +162,7 @@ def infer_cue_list(
     for i, (cue, onset_ms) in enumerate(zip(cues, onset_ms_list)):
         next_onset = onset_ms_list[i + 1] if i + 1 < len(onset_ms_list) else None
         next_onset_relative = (next_onset - onset_ms) if next_onset is not None else None
-        resolved_cue = infer_adsr(cue, next_cue_onset_ms=next_onset_relative)
+        resolved_cue = infer_adsr(cue, next_cue_gap_ms=next_onset_relative)
         resolved_cue.sample_offset = None  # set by pipeline after this stage
         resolved.append(resolved_cue)
 

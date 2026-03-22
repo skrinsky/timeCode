@@ -128,23 +128,23 @@ class TestDurationInference:
         cue = CueEvent(sound="piano C4", timecode="00:00:01:00")
         # next cue is 600ms later, R will be inferred from piano (500ms)
         # gap = 600 - R = 600 - 500 = 100ms
-        r = infer_adsr(cue, next_cue_onset_ms=600.0)
+        r = infer_adsr(cue, next_cue_gap_ms=600.0)
         assert r.duration_ms == pytest.approx(100.0, abs=1.0)
 
     def test_last_cue_uses_instrument_default(self):
         # No next cue → falls through to instrument default
         cue = CueEvent(sound="piano C4", timecode="00:00:01:00")
-        r = infer_adsr(cue, next_cue_onset_ms=None)
+        r = infer_adsr(cue, next_cue_gap_ms=None)
         assert r.duration_ms == INSTRUMENT_DEFAULTS["piano"]["duration_ms"]
 
     def test_text_long(self):
         cue = CueEvent(sound="long pad chord", timecode="00:00:01:00")
-        r = infer_adsr(cue, next_cue_onset_ms=None)
+        r = infer_adsr(cue, next_cue_gap_ms=None)
         assert r.duration_ms == 2000.0
 
     def test_text_short(self):
         cue = CueEvent(sound="short click", timecode="00:00:01:00")
-        r = infer_adsr(cue, next_cue_onset_ms=None)
+        r = infer_adsr(cue, next_cue_gap_ms=None)
         assert r.duration_ms == 200.0
 
 
