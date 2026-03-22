@@ -46,12 +46,13 @@ class TestADSREstimatorShapes:
             assert v.shape == (BATCH,)
 
     def test_predict_nonnegative(self):
-        # A, D, R should be >= 0 (exp(x) - 1 can be negative if x < 0 → clamp needed?)
-        # In practice exp(x)-1 >= -1, but large negative outputs are penalized by training.
-        # Just verify S is in [0,1].
+        # A, D, R are clamped to >= 0 in predict(); S is bounded by sigmoid.
         model = ADSREstimator()
         audio = torch.randn(BATCH, N_SAMPLES)
         out = model.predict(audio)
+        assert out["A"].min() >= 0.0
+        assert out["D"].min() >= 0.0
+        assert out["R"].min() >= 0.0
         assert out["S"].min() >= 0.0
         assert out["S"].max() <= 1.0
 
@@ -61,7 +62,8 @@ class TestADSREstimatorShapes:
         a2 = torch.randn(1, N_SAMPLES)
         o1 = model.predict(a1)
         o2 = model.predict(a2)
-        assert not torch.allclose(o1["A"], o2["A"])
+        # S uses sigmoid — always unbounded from below, safe to compare without clamping
+        assert not torch.allclose(o1["S"], o2["S"])
 
 
 class TestADSREstimatorLoss:
