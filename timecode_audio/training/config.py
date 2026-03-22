@@ -25,6 +25,7 @@ class TrainingConfig:
     batch_size: int = 16
     total_steps: int = 500_000
     warmup_steps: int = 2_000
+    start_step: int = 0               # steps already completed before this run (set to Stage 2 end step for Stage 3)
     grad_clip: float = 1.0
     adsr_lr_scale:     float = 1.0            # multiplier for ADSR encoder LR (set to 0.3 for Stage 3)
     log_every: int = 100
@@ -44,7 +45,7 @@ class TrainingConfig:
         (400_000, 500_000, "stage4_augmentation"),
     ])
 
-    # --- CFG (text dropout for Stage 2+) ---
+    # --- CFG (text dropout for Stage 3+, when text encoder is active) ---
     text_dropout_prob: float = 0.30   # 30% null text during training
 
     # --- Output ---
@@ -58,5 +59,5 @@ class TrainingConfig:
         return self.curriculum[-1][2]
 
     def use_text(self, step: int) -> bool:
-        """Text conditioning active from Stage 2 onwards."""
-        return step >= self.curriculum[1][0]
+        """Text conditioning active from Stage 3 onwards (text_dim=512 required)."""
+        return step >= self.curriculum[2][0]

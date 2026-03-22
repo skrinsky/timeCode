@@ -51,14 +51,18 @@ class MultiScaleSpectralLoss(nn.Module):
         self,
         pred: torch.Tensor,    # [batch, n_samples]
         target: torch.Tensor,  # [batch, n_samples]
+        reduction: str = "mean",
     ) -> torch.Tensor:
-        """Returns scalar loss."""
+        """
+        Returns scalar loss (reduction='mean') or per-sample losses [batch]
+        (reduction='none'). Use reduction='none' for confidence-weighted loss.
+        """
         # Pad or trim to same length
         min_len = min(pred.shape[-1], target.shape[-1])
         pred   = pred[..., :min_len]
         target = target[..., :min_len]
 
-        total = torch.tensor(0.0, device=pred.device)
+        total = torch.zeros(pred.shape[0], device=pred.device)
         for stft in self.stfts:
             mag_pred   = stft(pred)    # [batch, freq, time]
             mag_target = stft(target)
@@ -67,9 +71,14 @@ class MultiScaleSpectralLoss(nn.Module):
                 mag_pred   = torch.log(mag_pred   + 1e-7)
                 mag_target = torch.log(mag_target + 1e-7)
 
-            total = total + torch.mean(torch.abs(mag_pred - mag_target))
+            # Mean over freq+time, keep batch dim
+            total = total + torch.mean(torch.abs(mag_pred - mag_target), dim=[-2, -1])
 
-        return total / len(self.stfts)
+        per_sample = total / len(self.stfts)  # [batch]
+
+        if reduction == "none":
+            return per_sample
+        return per_sample.mean()
 
 
 class _STFTMagnitude(nn.Module):

@@ -130,6 +130,11 @@ class MixedDataset(Dataset):
         nsynth_dataset: Dataset,
         synthetic_ratio: float = 0.7,
     ) -> None:
+        if len(nsynth_dataset) == 0:
+            raise ValueError(
+                "NSynthDataset is empty — check min_confidence threshold or data directory. "
+                "Lower min_confidence or verify run_pseudo_label.py produced metadata.jsonl."
+            )
         self.synthetic = synthetic_dataset
         self.nsynth    = nsynth_dataset
         self.synthetic_ratio = synthetic_ratio

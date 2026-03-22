@@ -2,9 +2,9 @@
 Training loop for Option A (ADSR-extended DDSP).
 
 Curriculum:
-    Stage 1 (0–50K):    sine + sawtooth, pitch-only conditioning
-    Stage 2 (50K–200K): all synths, add text + 30% null dropout
-    Stage 3 (200K–400K): synthetic + NSynth
+    Stage 1 (0–50K):    sine + sawtooth, pitch-only (text_dim=0)
+    Stage 2 (50K–200K): all synths, pitch-only (text_dim=0, preserves Stage 1 checkpoint shape)
+    Stage 3 (200K–400K): synthetic + NSynth, CLAP text conditioning + 30% null dropout (text_dim=512)
     Stage 4 (400K+):    + augmentation, upsample edge cases
 
 Loss: Multi-Scale Spectral (MSS) only.
@@ -88,7 +88,7 @@ class Trainer:
         )
         cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            T_max=max(1, config.total_steps - config.warmup_steps),
+            T_max=max(1, config.total_steps - config.start_step - config.warmup_steps),
             eta_min=config.learning_rate * 0.01,
         )
         self.scheduler = torch.optim.lr_scheduler.SequentialLR(
@@ -210,12 +210,13 @@ class Trainer:
             text_emb=text_emb,
         )
 
-        loss = self.loss_fn(audio_pred, audio_target)
-
         # Confidence-weighted loss (Stage 3: down-weight uncertain pseudo-labels)
         if "adsr_confidence" in batch:
-            confidence = batch["adsr_confidence"].to(self.device)
-            loss = loss * confidence.mean()
+            confidence = batch["adsr_confidence"].to(self.device)  # [B]
+            per_sample = self.loss_fn(audio_pred, audio_target, reduction="none")  # [B]
+            loss = (per_sample * confidence).mean()
+        else:
+            loss = self.loss_fn(audio_pred, audio_target)
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
@@ -346,7 +347,11 @@ class Trainer:
                 new_state[k] = v
             elif k == "spectral_predictor.trunk.0.weight":
                 # [hidden_dim, old_in_dim] → [hidden_dim, new_in_dim]
-                # Copy pitch portion; text portion stays at kaiming init
+                # Copy pitch columns; zero the text columns so Stage 3 starts at
+                # Stage 2 behavior for null-text passes (zeros × weight = 0 regardless
+                # of init; but for text-conditioned passes random init can cause large
+                # initial perturbations, so zeros are more stable).
+                new_state[k].zero_()
                 new_state[k][:, : v.shape[1]] = v
         self.synthesizer.load_state_dict(new_state)
 

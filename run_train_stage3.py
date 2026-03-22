@@ -23,6 +23,7 @@ config = TrainingConfig(
     text_dim       = 512,
     adsr_lr_scale  = 0.3,
     total_steps    = 400_000,
+    start_step     = 200_000,   # Stage 3 begins at step 200K; cosine T_max = 199K
     batch_size     = 16,
     warmup_steps   = 1_000,
 )
