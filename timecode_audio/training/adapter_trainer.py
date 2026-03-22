@@ -235,7 +235,9 @@ class AdapterTrainer:
 
         # 6. Forward through frozen DiT (outside no_grad so grads flow to adapter_embed)
         # DiT params have requires_grad=False so only adapter gets updated.
-        model_output = self.sa_model.model(noisy_latents_adapted, t, cond)
+        # sa_model.model is the raw DiT — unpack cond as kwargs so individual
+        # tensors (cross_attn_cond, global_cond, ...) land on the right params.
+        model_output = self.sa_model.model(noisy_latents_adapted, t, **cond)
 
         # 7. V-prediction loss
         target = v_prediction_target(latents.detach(), noise, alphas, sigmas)
@@ -279,7 +281,7 @@ class AdapterTrainer:
             noisy_latents_adapted = noisy_latents + adapter_embed
 
             cond = self._get_conditioning(texts, seconds_total)
-            model_output = self.sa_model.model(noisy_latents_adapted, t, cond)
+            model_output = self.sa_model.model(noisy_latents_adapted, t, **cond)
 
             target = v_prediction_target(latents, noise, alphas, sigmas)
             total_loss += F.mse_loss(model_output, target).item()
