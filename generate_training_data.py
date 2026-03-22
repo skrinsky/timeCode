@@ -33,8 +33,8 @@ except ImportError:
     _mod.packaging = _packaging
     sys.modules["pkg_resources"] = _mod
 
+import soundfile as sf
 import torch
-import torchaudio
 from einops import rearrange
 
 SAMPLE_RATE = 44100
@@ -279,8 +279,8 @@ def main():
 
                 # Normalize and save
                 peak = clip.abs().max().clamp(min=1e-8)
-                clip_normalized = (clip / peak * 0.95).cpu()
-                torchaudio.save(str(save_path), clip_normalized, sample_rate)
+                clip_normalized = (clip / peak * 0.95).cpu().numpy().T  # [n_samples, 2]
+                sf.write(str(save_path), clip_normalized, sample_rate)
 
                 rec = {
                     "audio_path":   str(save_path.resolve()),
