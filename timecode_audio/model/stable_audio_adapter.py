@@ -133,14 +133,14 @@ class EnvelopeAdapter(nn.Module):
         """
         Compute adapter embedding for CFG at inference.
 
-        Returns the guided embedding:
-            embed_null + guidance_scale * (embed_full - embed_null)
+        The null condition is zero adapter output (matching the 20% dropout
+        during training, which multiplies adapter_embed by 0 — not by passing
+        a zero envelope through the projection, which would give proj.bias).
 
-        embed_null = adapter(zeros), embed_full = adapter(envelope)
+        Returns: guidance_scale * embed_full
         """
         embed_full = self.forward(envelope)
-        embed_null = self.forward(torch.zeros_like(envelope))
-        return embed_null + guidance_scale * (embed_full - embed_null)
+        return guidance_scale * embed_full
 
     def save(self, path: str) -> None:
         torch.save(self.state_dict(), path)
