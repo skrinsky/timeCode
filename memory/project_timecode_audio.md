@@ -1,60 +1,131 @@
 ---
 name: timecode_audio_project
-description: Overview of the ADSR-conditioned timecode-aligned generative audio project — what it is, the research gap, architecture, where files live, and current build status
+description: Full project state — architecture, completed work, current path, key technical decisions, and next steps for ADSR-conditioned timecode-aligned generative audio
 type: project
 ---
 
-This project is building a novel generative audio system that maps ADSR envelope parameters (Attack, Decay, Sustain, Release) to SMPTE timecode cue positions to synthesize audio. No existing system does this.
+## What this project is
 
-**Why:** Generative audio models can't align to timecode. Existing approaches control when sounds occur (PicoAudio, FreeAudio) or draw amplitude curves (Music ControlNet, T-Foley) but none accept discrete ADSR parameters per timecode cue and use them to shape both amplitude envelope and spectral evolution.
+Generative audio system that maps explicit ADSR envelope parameters (Attack, Decay, Sustain, Release) to SMPTE timecode cue positions to synthesize audio. No existing system does this — closest prior art is Sketch2Sound (Adobe, ICASSP 2025) which does amplitude curves but not discrete ADSR parameters or timecodes.
 
-**The gap (verified genuine):** No system maps explicit A/D/S/R as four named values to timecode positions to drive generative synthesis. Closest prior art: MPEG-4 SASL (1999, deterministic only), JASCO (chords/rhythm not ADSR), SynthCloner (ADSR transfer but no timeline), DDSP (implicit envelope, not user-specified). Sketch2Sound (Adobe, ICASSP 2025) validates the adapter+CFG approach but is amplitude-only, no ADSR parameterization, no timecode.
-
-**Key creative feature:** Timbre and envelope are independent pathways — users can combine any sound description with any ADSR shape, including physically impossible combinations (sustained snare, slow-attack piano, instant strings).
-
-**Two-mode input:**
+**Two input modes:**
 - Easy: `{"timecode": "00:01:23:14", "sound": "staccato piano C4"}` — ADSR inferred from text
 - Precise: add explicit A/D/S/R fields — override any or all inferred defaults
 - BPM mode: `{"position": "1.1.0", "sound": "kick drum"}` with session-level bpm/time_signature
 
-**Architecture:**
-- Option A (built): ADSR-extended DDSP at 48kHz. Analytic ADSR gate controls amplitude; stage_position(t) drives spectral interpolation between two learned states (params_peak, params_sustain). Fast, ADSR-guaranteed, limited to harmonic sounds.
-- Option B (Phase 6): ETTA-DiT backbone + ADSR cross-attention ControlNet adapter. Text via AdaLayerNorm (frozen), ADSR via cross-attention (trained). Handles drums, foley, complex sounds.
+**Key creative feature:** Text prompt controls timbre, ADSR controls envelope — independently. Physically impossible combinations are valid ("sustained snare drum", "slow-attack piano").
 
-**Data strategy:**
-- Option A: 500K synthetic clips (known ADSR) + NSynth estimated (200K) + augmentation
-- Option B: AF3 off-the-shelf for sound type labels; ADSR estimator (synthetic pre-trained) for ADSR pseudo-labels; ~100-200 clip human evaluation gate before scaling
+---
 
-**File locations:**
-- Repo: /Users/summerkrinsky/Documents/GitHub/timeCode/
-- Research + implementation plan: research/implementation_plan.md (full, detailed, ~830 lines)
-- Prior art survey: research/timecode_aligned_audio.md
-- Code: timecode_audio/
+## Current architecture: Option B — Stable Audio Open + envelope adapter
 
-**Implementation phases and status:**
-- ✅ Phase 0: Infrastructure complete (SMPTE parser, BPM resolver, CueEvent schema, ADSR gate/stage_position, ADSR inferer, defaults lookup) — 123 tests passing
-- ✅ Phase 1: DDSP baseline built and all bugs fixed (filtered_noise vectorized, batch_size 64→16, LR warmup, STFT window buffer, 29.97ND timecode fix) — 134 tests passing
-- ✅ Stage 1 training: COMPLETE on 4090. 50K steps, final loss 0.93, checkpoint saved to checkpoints_stage1_backup/
-- ⏳ Stage 2 training: IN PROGRESS on 4090. 200K total steps, resuming from step 45K, all 5 instrument types (sine/sawtooth/square/FM2op/FM4op), pitch-only conditioning. ~8-9 hrs.
-- ✅ Phase 4 (partial): ADSR estimator built (adsr_estimator.py, estimator_trainer.py) — CNN on log-mel spectrograms, 4 regression heads, 11 tests passing. Ready to train after Stage 2.
-- 🔲 NEXT: Wire CLAP into trainer before Stage 3 (text_emb=None is hardcoded — must fix before NSynth fine-tuning)
-- 🔲 Phase 2: Inference pipeline (CueList → WAV)
-- 🔲 Phase 3: Real instrument fine-tuning (NSynth — pitched only, no drums)
-- 🔲 Phase 5: Pseudo-label + dataset validation
-- 🔲 Phase 6: Diffusion upgrade (Option B, ETTA backbone) — needed for drums/foley/percussion
+**Why we moved away from DDSP (Option A):**
+- DDSP has a hard timbral quality ceiling (harmonic-plus-noise, can't do foley/SFX/drums)
+- NSynth is 16kHz — upsampling adds no information above 8kHz
+- SLE and RTE evaluation metrics failed due to fundamental architectural issue: DDSP synthesizer's spectral energy varies across ADSR stages independently of the gate, so S in the gate doesn't map to S in the output amplitude. Not fixable without losing natural amplitude evolution.
+- Option A ATE=5ms ✓, DTE=10ms ✓, SLE=0.36 ✗ (target 0.05), RTE=82.5ms ✗ (target 50ms)
 
-**Training setup:**
-- Server: cmn17, /scratch/summerk/timeCode, tmux session "train2"
-- Train on 4090 (CUDA), NOT M1 Metal — MPS has incomplete op support for torch.stft and torch.fft.rfft
-- CUDA PyTorch: `uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121`
-- torchaudio 2.5+ breaks save/load — use soundfile directly (already fixed in synthetic_gen.py)
-- Stage 2 data: 500K clips, all 5 instrument types, in data/synthetic/
-- After Stage 2: run run_train_estimator.py, then wire CLAP, then Stage 3 on NSynth
-- NSynth: pitched instruments only (piano, strings, brass, guitar, etc.) — no drums/percussion
+**Why ETTA was dropped as the backbone:**
+- ETTA (NVIDIA, ICML 2025) was original planned backbone. Weights announced October 2024, still "coming soon" as of March 2026. GitHub has training code but no checkpoint.
 
-**CLAP integration (TODO before Stage 3):**
-- CLAPTextEncoder already written in text_encoder.py
-- Trainer hardcodes text_emb=None — needs to be wired up
-- Need: text dropout (30%), CLAP embeddings passed through SpectralPredictor, text_dim=512 in config
+**Current backbone: Stable Audio Open (Stability AI)**
+- Available on HuggingFace: `stabilityai/stable-audio-open-1.0` (gated — requires license acceptance)
+- 44.1kHz stereo, up to 47 seconds
+- VAE: AutoencoderOobleck, 64 latent channels, 2048x temporal downsampling → ~21.53 Hz latent frame rate
+- DiT: 24 layers, inner_dim=1536, 24 attention heads (GQA 12 KV heads), cross_attn_dim=768
+- Text encoder: T5-base (768-dim), frozen
+- Timing conditioning: seconds_start + seconds_total via projection model
+- Diffusion objective: v-prediction with cosine schedule (t ∈ [0,1])
+- Trained on Freesound CC0 — covers instruments, SFX, foley, ambiences, everything
 
-**Why:** Motivated by the problem that generative audio can't align to post-production timecode. Intended for film/TV/game audio use cases. BPM mode also supports music production workflows.
+**Adapter architecture (Sketch2Sound pattern, ICASSP 2025):**
+- Single trainable `Linear(1, 64)` — zero initialized
+- ADSR params → `adsr_gate_samples()` → 1D piecewise-linear envelope curve [T_samples]
+- Curve aligns exactly with VAE frame rate (frame_size=2048 samples = one latent frame)
+- Linear projects [B, T_latent, 1] → [B, T_latent, 64] → transpose → [B, 64, T_latent]
+- Added element-wise to noisy latents before DiT forward pass
+- 20% envelope dropout per clip during training → enables CFG over envelope at inference
+- Random median filter augmentation (window 1–25 frames) during training
+
+**Output sample rate:** 44.1kHz from Stable Audio → upsample to 48kHz with `sinc_interp_kaiser` at pipeline output (post-production standard)
+
+---
+
+## Completed work
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 0: Infrastructure | ✅ Complete | SMPTE parser, BPM resolver, CueEvent schema, ADSR gate/stage_position, adsr_inferer, adsr_defaults — 134 tests passing |
+| Option A Stage 1 (DDSP) | ✅ Complete | 50K steps, sine+sawtooth |
+| Option A Stage 2 (DDSP) | ✅ Complete | 200K steps, all 5 synth types |
+| Option A Stage 3 (DDSP) | ✅ Complete | 400K steps, NSynth fine-tuning with CLAP |
+| ADSR Estimator | ✅ Complete | CNN on log-mel spec, MC dropout confidence (fixed: log-space variance), Platt scaler not yet fitted |
+| NSynth pseudo-labeling | ✅ Complete | 143,861 clips above confidence 0.5 at data/nsynth_estimated/metadata.jsonl |
+| Option B adapter code | ✅ Complete | stable_audio_adapter.py, adapter_dataset.py, adapter_trainer.py |
+| Option B data generation | ✅ Code written | generate_training_data.py — 80+ prompts, needs to run on cluster |
+
+---
+
+## Next steps (in order)
+
+1. **On cluster:** `pip install stable-audio-tools einops`
+2. **Accept HF license** at huggingface.co/stabilityai/stable-audio-open-1.0, set HF_TOKEN
+3. **Generate training data:** `python generate_training_data.py --n_clips 20000` (runs overnight)
+4. **Train adapter:** `python run_adapter_train.py`
+5. **ADSR sensitivity test:** generate same prompt with A=10ms vs A=500ms — if ATE > 100ms, unfreeze last 4 DiT layers
+6. **Inference pipeline rewrite** for Stable Audio Open backbone (pipeline.py, mixer.py)
+7. **Freesound dataset** (Phase 5) for additional diversity if adapter precision insufficient
+
+---
+
+## Key files
+
+```
+timecode_audio/
+  core/
+    timecode.py, bpm_resolver.py, cue_event.py, envelope.py
+    adsr_defaults.py, adsr_inferer.py
+  model/
+    stable_audio_adapter.py   ← NEW: EnvelopeAdapter, audio_to_envelope()
+    adsr_estimator.py         ← ADSR estimator (pseudo-labeling)
+    ddsp_synthesizer.py       ← Option A reference only
+  data/
+    adapter_dataset.py        ← NEW: training data loader for adapter
+    nsynth_loader.py          ← NSynth with pseudo-labels
+    synthetic_gen.py
+  training/
+    adapter_trainer.py        ← NEW: Option B training loop
+    trainer.py                ← Option A trainer
+    config.py
+  eval/
+    adsr_metrics.py           ← ATE/DTE/SLE/RTE (uses note_duration for fitting)
+generate_training_data.py     ← NEW: generate clips from Stable Audio Open
+run_adapter_train.py          ← NEW: launch adapter training
+run_train_stage3.py           ← Option A Stage 3 (complete)
+run_eval.py                   ← Option A evaluation
+research/implementation_plan.md  ← Full plan, up to date
+```
+
+---
+
+## Dev environment
+
+**Local machine:**
+- Package manager: uv — `uv run python`, `uv run pytest`, `uv pip install`
+- Python 3.11.14 in .venv managed by uv
+- Bare `python` not on PATH — always use `uv run python`
+
+**Cluster (training):**
+- Server: cmn17, /scratch/summerk/timeCode, tmux "train2"
+- GPU: 4090 (CUDA)
+- Standard python/pip work fine on cluster
+
+---
+
+## Important technical decisions
+
+- **ADSR as envelope curve, not 4 scalars:** Adapter receives the output of `adsr_gate_samples()` — a 1D time series — not discrete A/D/S/R values. This is how Sketch2Sound works and what diffusion models can follow.
+- **Zero initialization:** Adapter starts by adding nothing — model inherits pretrained behavior exactly at step 0.
+- **Training data source:** Generate from Stable Audio Open itself (self-supervised, in-distribution). Do NOT use synthetic DDSP audio — completely out of Stable Audio's distribution.
+- **Platt scaler not fitted:** ADSR estimator confidence uses uncalibrated `1/(1+mean_var)`. Acceptable for current pseudo-labels since threshold (0.5) is already filtering well empirically. Fit Platt scaler before Phase 5 (Freesound pseudo-labeling at scale).
+- **v-prediction + cosine schedule:** stable-audio-tools uses t ∈ [0,1], alphas=cos(t*π/2), sigmas=sin(t*π/2). This is what adapter_trainer.py implements.
