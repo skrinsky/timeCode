@@ -119,10 +119,6 @@ def _drop_frame_count(hh: int, mm: int, ss: int, ff: int, frame_rate: str) -> in
     else:
         # Fallback: manual drop-frame formula (well-tested, from SMPTE spec)
         drop_frames = 2  # frames dropped per minute
-        frames_per_10min = 17982  # 29.97 * 600
-        frames_per_min = 1800 - drop_frames  # 1798
-
-        d = hh * 2 * 1800  # hours → frames (approximate, corrected below)
         # Standard SMPTE DF formula
         total_minutes = 60 * hh + mm
         frame_number = (

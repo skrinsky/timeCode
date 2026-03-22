@@ -158,18 +158,19 @@ class TestDropFrame:
         assert offset == expected
 
     def test_drop_is_two_frames_wide(self):
-        # The gap between 00:00:59:29 and 00:01:00:02 should be exactly 2 frames
-        # (frames 00:01:00:00 and 00:01:00:01 are dropped).
-        # This is verified indirectly: the sample offset jump from :29 to :02
-        # should equal 3 frame-periods (29→30≡02 with 2 dropped = 3 nominal frames).
+        # Labels :00 and :01 at minute 1 are dropped: the label after 00:00:59:29
+        # is 00:01:00:02. Using the SMPTE DF formula, the physical frame numbers are:
+        #   00:00:59:28 → frame 1798
+        #   00:00:59:29 → frame 1799
+        #   00:01:00:02 → frame 1800
+        # Each label step is exactly 1 physical frame — the dropped labels do not
+        # add extra elapsed time; they are just skipped in numbering.
         offset_a = smpte_to_sample_offset("00:00:59:28", "29.97df", SAMPLE_RATE)
         offset_b = smpte_to_sample_offset("00:00:59:29", "29.97df", SAMPLE_RATE)
         offset_c = smpte_to_sample_offset("00:01:00:02", "29.97df", SAMPLE_RATE)
-        # Each nominal frame ≈ 1601.6 samples at 48kHz/29.97; the gap a→b and b→c
-        # should each be one frame apart.
         one_frame = round(SAMPLE_RATE * 1001 / 30000)
-        assert abs((offset_b - offset_a) - one_frame) <= 1   # one frame step
-        assert abs((offset_c - offset_b) - one_frame) <= 1   # one frame step (drop absorbed)
+        assert abs((offset_b - offset_a) - one_frame) <= 1   # one physical frame
+        assert abs((offset_c - offset_b) - one_frame) <= 1   # one physical frame (drop is label-only)
 
 
 # ---------------------------------------------------------------------------
