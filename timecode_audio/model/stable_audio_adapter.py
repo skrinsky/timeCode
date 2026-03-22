@@ -149,4 +149,4 @@ class EnvelopeAdapter(nn.Module):
     def load(cls, path: str, device: str = "cpu") -> "EnvelopeAdapter":
         adapter = cls()
         adapter.load_state_dict(torch.load(path, map_location=device))
-        return adapter
+        return adapter.to(device)
