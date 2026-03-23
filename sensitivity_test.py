@@ -87,7 +87,7 @@ def generate_with_adsr(sa_model, adapter, prompt, A, D, S, R, duration_s, device
     # Register a forward pre-hook on the conditioned model to inject adapter
     injected = {"embed": adapter_embed, "hook_count": 0}
 
-    def inject_hook(module, args, kwargs):
+    def inject_hook(module, args):
         injected["hook_count"] += 1
         x = args[0]
         embed = injected["embed"]
@@ -99,7 +99,7 @@ def generate_with_adsr(sa_model, adapter, prompt, A, D, S, R, duration_s, device
             embed = embed[:, :, :T]
         if embed.shape[0] < x.shape[0]:
             embed = embed.expand(x.shape[0], -1, -1)
-        return (x + embed,) + args[1:], kwargs
+        return (x + embed,) + args[1:]
 
     # generate_diffusion_cond calls sa_model.model (DiTWrapper), not sa_model itself.
     # Register on sa_model.model so the hook actually fires.
