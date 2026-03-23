@@ -125,6 +125,9 @@ def generate_with_adsr(sa_model, adapter, prompt, A, D, S, R, duration_s, device
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--adapter",   default="checkpoints_adapter/adapter_best.pt")
+    parser.add_argument("--dit_ckpt",  default=None,
+                        help="Path to fine-tuned DiT layers (checkpoints_adapter_ft/dit_layers_best.pt). "
+                             "Only needed after stage-2 fine-tuning.")
     parser.add_argument("--prompt",    default="grand piano note, single key, middle C")
     parser.add_argument("--duration",  type=float, default=4.0, help="clip duration in seconds")
     parser.add_argument("--steps",     type=int,   default=50)
@@ -144,6 +147,18 @@ def main():
     print(f"Loading adapter from {args.adapter}...")
     adapter = EnvelopeAdapter.load(args.adapter, device=str(device))
     adapter.eval()
+
+    if args.dit_ckpt:
+        print(f"Loading fine-tuned DiT layers from {args.dit_ckpt}...")
+        dit_state = torch.load(args.dit_ckpt, map_location=device)
+        # Load only the saved params (last N layers) into the model
+        current = dict(sa_model.named_parameters())
+        for name, data in dit_state.items():
+            if name in current:
+                current[name].data.copy_(data)
+            else:
+                print(f"  [WARNING] {name} not found in sa_model — skipping")
+        print(f"  Loaded {len(dit_state)} parameter tensors.")
 
     out_dir = Path(args.out_dir)
     D, S, R = 100.0, 0.6, 500.0   # hold D/S/R constant
