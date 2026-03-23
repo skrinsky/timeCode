@@ -69,7 +69,7 @@ def detect_attack_time_ms(audio_np, sample_rate, threshold=0.05):
     return idx / sample_rate * 1000.0
 
 
-def generate_with_adsr(sa_model, adapter, prompt, A, D, S, R, duration_s, device, steps=50, cfg_scale=7.0, envelope_guidance=3.0):
+def generate_with_adsr(sa_model, adapter, prompt, A, D, S, R, duration_s, device, steps=50, cfg_scale=7.0, envelope_guidance=10.0):
     """Generate audio conditioned on the given ADSR envelope."""
     from stable_audio_tools.inference.generation import generate_diffusion_cond
 
@@ -89,17 +89,30 @@ def generate_with_adsr(sa_model, adapter, prompt, A, D, S, R, duration_s, device
 
     def inject_hook(module, args):
         injected["hook_count"] += 1
-        x = args[0]
-        embed = injected["embed"]
+        x = args[0]           # [B_full, 64, T] where B_full = 2*batch for batch_cfg
+        embed = injected["embed"]   # [1, 64, T_env]
+
+        # Pad/trim to match latent length
         T = x.shape[2]
         E = embed.shape[2]
         if E < T:
             embed = torch.nn.functional.pad(embed, (0, T - E))
         else:
             embed = embed[:, :, :T]
-        if embed.shape[0] < x.shape[0]:
-            embed = embed.expand(x.shape[0], -1, -1)
-        return (x + embed,) + args[1:]
+
+        B_full = x.shape[0]
+        # batch_cfg doubles the batch: first half = null cond, second half = text cond.
+        # Only inject adapter into the conditioned half so CFG amplifies the effect.
+        B = B_full // 2
+        if B > 0 and B_full > 1:
+            embed_cond = embed.expand(B, -1, -1)
+            x_new = x.clone()
+            x_new[B:] = x[B:] + embed_cond   # conditioned half only
+        else:
+            # Single-item batch (no CFG doubling): inject into everything
+            x_new = x + embed.expand(B_full, -1, -1)
+
+        return (x_new,) + args[1:]
 
     # generate_diffusion_cond calls sa_model.model (DiTWrapper), not sa_model itself.
     # Register on sa_model.model so the hook actually fires.
@@ -142,6 +155,8 @@ def main():
                         help="Fast attack time in ms (default 10)")
     parser.add_argument("--attack_slow", type=float, default=500.0,
                         help="Slow attack time in ms (default 500)")
+    parser.add_argument("--envelope_guidance", type=float, default=10.0,
+                        help="Guidance scale for envelope adapter (default 10.0)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Fixed random seed so both clips differ only in envelope")
     args = parser.parse_args()
@@ -187,6 +202,7 @@ def main():
             duration_s=args.duration,
             device=device,
             steps=args.steps,
+            envelope_guidance=args.envelope_guidance,
         )
         path = out_dir / f"sensitivity_test_{label}.wav"
         sf.write(str(path), audio, SAMPLE_RATE)
