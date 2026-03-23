@@ -126,12 +126,14 @@ class AdapterFinetuner:
         # Unfreeze last `dit_layers` transformer blocks
         # Stable Audio Open DiT: sa_model.model.transformer.layers (24 blocks)
         # Try known path; if it fails, print the model structure to help debug.
+        # Path: ConditionedWrapper -> DiTWrapper -> DiffusionTransformer
+        # sa_model.model = DiTWrapper, sa_model.model.model = DiffusionTransformer
         try:
-            dit_blocks = self.sa_model.model.transformer.layers
+            dit_blocks = self.sa_model.model.model.transformer.layers
         except AttributeError:
-            print("\n[ERROR] Could not find sa_model.model.transformer.layers")
-            print("Top-level attributes of sa_model.model:")
-            for name, _ in self.sa_model.model.named_children():
+            print("\n[ERROR] Could not find sa_model.model.model.transformer.layers")
+            print("Children of sa_model.model.model:")
+            for name, _ in self.sa_model.model.model.named_children():
                 print(f"  {name}")
             raise
         n_total = len(dit_blocks)
