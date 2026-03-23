@@ -132,6 +132,10 @@ def main():
     parser.add_argument("--duration",  type=float, default=4.0, help="clip duration in seconds")
     parser.add_argument("--steps",     type=int,   default=50)
     parser.add_argument("--out_dir",   default=".")
+    parser.add_argument("--attack_fast", type=float, default=10.0,
+                        help="Fast attack time in ms (default 10)")
+    parser.add_argument("--attack_slow", type=float, default=500.0,
+                        help="Slow attack time in ms (default 500)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -163,7 +167,9 @@ def main():
     out_dir = Path(args.out_dir)
     D, S, R = 100.0, 0.6, 500.0   # hold D/S/R constant
 
-    for A, label in [(10.0, "A10ms"), (500.0, "A500ms")]:
+    fast_ms = args.attack_fast
+    slow_ms = args.attack_slow
+    for A, label in [(fast_ms, f"A{int(fast_ms)}ms"), (slow_ms, f"A{int(slow_ms)}ms")]:
         print(f"\nGenerating: A={A}ms, D={D}ms, S={S}, R={R}ms — '{args.prompt}'")
         audio = generate_with_adsr(
             sa_model, adapter, args.prompt,
