@@ -80,20 +80,23 @@ def generate_with_adsr(sa_model, adapter, prompt, A, D, S, R, duration_s, device
     adapter_embed = adapter.forward_with_cfg(envelope, guidance_scale=envelope_guidance)
     # adapter_embed: [1, 64, T_latent]
 
+    print(f"  adapter_embed: shape={adapter_embed.shape}, "
+          f"norm={adapter_embed.norm().item():.6f}, "
+          f"max={adapter_embed.abs().max().item():.6f}")
+
     # Register a forward pre-hook on the conditioned model to inject adapter
-    injected = {"embed": adapter_embed}
+    injected = {"embed": adapter_embed, "hook_count": 0}
 
     def inject_hook(module, args, kwargs):
+        injected["hook_count"] += 1
         x = args[0]
         embed = injected["embed"]
-        # Pad/trim embed to match x's T_latent
         T = x.shape[2]
         E = embed.shape[2]
         if E < T:
             embed = torch.nn.functional.pad(embed, (0, T - E))
         else:
             embed = embed[:, :, :T]
-        # Broadcast to batch size
         if embed.shape[0] < x.shape[0]:
             embed = embed.expand(x.shape[0], -1, -1)
         return (x + embed,) + args[1:], kwargs
@@ -118,6 +121,7 @@ def generate_with_adsr(sa_model, adapter, prompt, A, D, S, R, duration_s, device
         )
 
     handle.remove()
+    print(f"  hook fired {injected['hook_count']} times")
     audio = output[0].float().cpu().numpy().T   # [n_samples, 2]
     return audio[:int(duration_s * SAMPLE_RATE)]
 
