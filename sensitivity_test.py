@@ -136,6 +136,8 @@ def main():
                         help="Fast attack time in ms (default 10)")
     parser.add_argument("--attack_slow", type=float, default=500.0,
                         help="Slow attack time in ms (default 500)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Fixed random seed so both clips differ only in envelope")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -170,6 +172,8 @@ def main():
     fast_ms = args.attack_fast
     slow_ms = args.attack_slow
     for A, label in [(fast_ms, f"A{int(fast_ms)}ms"), (slow_ms, f"A{int(slow_ms)}ms")]:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
         print(f"\nGenerating: A={A}ms, D={D}ms, S={S}, R={R}ms — '{args.prompt}'")
         audio = generate_with_adsr(
             sa_model, adapter, args.prompt,
