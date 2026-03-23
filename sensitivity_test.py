@@ -101,7 +101,9 @@ def generate_with_adsr(sa_model, adapter, prompt, A, D, S, R, duration_s, device
             embed = embed.expand(x.shape[0], -1, -1)
         return (x + embed,) + args[1:], kwargs
 
-    handle = sa_model.register_forward_pre_hook(inject_hook)
+    # generate_diffusion_cond calls sa_model.model (DiTWrapper), not sa_model itself.
+    # Register on sa_model.model so the hook actually fires.
+    handle = sa_model.model.register_forward_pre_hook(inject_hook)
 
     sample_size = math.ceil(int(duration_s * SAMPLE_RATE) / VAE_DOWNSAMPLE) * VAE_DOWNSAMPLE
     conditioning = [{"prompt": prompt, "seconds_start": 0, "seconds_total": duration_s}]
