@@ -88,11 +88,14 @@ def generate_with_adsr(sa_model, adapter, prompt, A, D, S, R, duration_s, device
     injected = {"embed": adapter_embed, "hook_count": 0}
 
     def inject_hook(module, args):
+        count = injected["hook_count"]
         injected["hook_count"] += 1
-        x = args[0]           # [B_full, 64, T] where B_full = 2*batch for batch_cfg
-        embed = injected["embed"]   # [1, 64, T_env]
+        x = args[0]
+        embed = injected["embed"]
 
-        # Pad/trim to match latent length
+        if count == 0:
+            print(f"  [hook] x.shape={x.shape}, embed.shape={embed.shape}")
+
         T = x.shape[2]
         E = embed.shape[2]
         if E < T:
@@ -101,15 +104,13 @@ def generate_with_adsr(sa_model, adapter, prompt, A, D, S, R, duration_s, device
             embed = embed[:, :, :T]
 
         B_full = x.shape[0]
-        # batch_cfg doubles the batch: first half = null cond, second half = text cond.
-        # Only inject adapter into the conditioned half so CFG amplifies the effect.
         B = B_full // 2
         if B > 0 and B_full > 1:
-            embed_cond = embed.expand(B, -1, -1)
+            # batch_cfg: try first half as conditioned
+            embed_b = embed.expand(B, -1, -1)
             x_new = x.clone()
-            x_new[B:] = x[B:] + embed_cond   # conditioned half only
+            x_new[:B] = x[:B] + embed_b
         else:
-            # Single-item batch (no CFG doubling): inject into everything
             x_new = x + embed.expand(B_full, -1, -1)
 
         return (x_new,) + args[1:]
